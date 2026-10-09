@@ -1,0 +1,14 @@
+version = 1
+
+test_patterns = ["**/*.test.ts", "**/*.spec.ts", "**/__tests__/**"]
+exclude_patterns = ["node_modules/**", "dist/**", "coverage/**"]
+
+[[analyzers]]
+name = "javascript"
+
+  [analyzers.meta]
+  plugins = ["react"]
+  environment = ["nodejs", "browser"]
+
+[[analyzers]]
+name = "secrets"

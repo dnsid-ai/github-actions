@@ -1,0 +1,28 @@
+codeql:
+  description: Run CodeQL. Turn off if the repo uses CodeQL "default setup" instead.
+  type: boolean
+  default: true
+codeql-queries:
+  description: CodeQL query suite (security-extended or security-and-quality).
+  type: string
+  default: security-extended
+dependency-review:
+  description: On pull requests, flag newly added vulnerable dependencies.
+  type: boolean
+  default: true
+dependency-review-severity:
+  description: Lowest severity that dependency review reports (low, moderate, high, critical).
+  type: string
+  default: high
+sbom:
+  description: Generate an SPDX SBOM of the project (uploaded in the reports artifact).
+  type: boolean
+  default: false
+sonar-host-url:
+  description: SonarQube server URL. Empty skips the Sonar job; reports are still published as an artifact.
+  type: string
+  default: ""
+sonar-args:
+  description: Extra sonar-scanner arguments, e.g. "-Dsonar.projectKey=my-service".
+  type: string
+  default: ""

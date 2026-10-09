@@ -1,0 +1,420 @@
+# GENERATED from security/src/container.yml by scripts/build.py. Do not edit here:
+# edit security/src/ and run `python3 scripts/build.py`.
+# Builds a container image locally (nothing is pushed) and scans it before it
+# reaches a registry: OS-package and language vulnerabilities, and secrets baked
+# into layers. Also writes an SBOM of the image. Scanning before the push
+# catches problems before the image reaches any registry.
+#
+#   jobs:
+#     image:
+#       uses: <org>/github-actions/.github/workflows/security-container.yml@<sha> # v1
+#       permissions: { contents: read, security-events: write, actions: read }
+#       with:
+#         dockerfile: Dockerfile
+#
+# Mark "<caller job> / Summary" as the required check. See README.md.
+name: Container
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label. Must be Linux x64.
+        type: string
+        default: ubuntu-24.04
+      artifact-prefix:
+        description: Prefix for artifact names. Set it when one run calls this workflow more than once (e.g. one call per image).
+        type: string
+        default: container
+      enforce-security:
+        description: When false (the default), findings are reported but do not fail the build.
+        type: boolean
+        default: false
+      upload-sarif:
+        description: Upload SARIF results to GitHub code scanning.
+        type: boolean
+        default: true
+      context:
+        description: Docker build context, relative to the repository root.
+        type: string
+        default: "."
+      dockerfile:
+        description: Dockerfile path, relative to the repository root.
+        type: string
+        default: Dockerfile
+      target:
+        description: Build stage to scan (--target). Empty builds the final stage.
+        type: string
+        default: ""
+      build-args:
+        description: Newline-separated KEY=VALUE build arguments. Not for secrets.
+        type: string
+        default: ""
+      trivy-severity:
+        description: Comma-separated Trivy severities to report.
+        type: string
+        default: HIGH,CRITICAL
+      ignore-unfixed:
+        description: Skip vulnerabilities that have no fixed version yet.
+        type: boolean
+        default: false
+      sbom:
+        description: Write an SPDX SBOM of the built image into the reports artifact.
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  image:
+    name: Image scan (Trivy)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 45
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # trivy 0.74.0, pinned by SHA-256 (verified against the release's published
+      # checksums when it ships one). Bump VERSION and SHA256 together.
+      - name: Install trivy
+        env:
+          VERSION: "0.74.0"
+          SHA256: "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a"
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/bin"; mkdir -p "$bin"
+          pkg="$RUNNER_TEMP/trivy.download"
+          curl -fsSL --retry 3 -o "$pkg" "https://github.com/aquasecurity/trivy/releases/download/v${VERSION}/trivy_${VERSION}_Linux-64bit.tar.gz"
+          echo "${SHA256}  $pkg" | sha256sum -c -
+          tar -xzf "$pkg" -C "$bin" trivy
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: Build image (local only, not pushed)
+        id: build
+        env:
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          TARGET: ${{ inputs.target }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+        run: |
+          set -euo pipefail
+          image="scan.local/${GITHUB_REPOSITORY,,}:${GITHUB_SHA::12}"
+          args=(build --file "$DOCKERFILE" --tag "$image")
+          if [ -n "$TARGET" ]; then args+=(--target "$TARGET"); fi
+          while IFS= read -r arg; do
+            if [ -n "$arg" ]; then args+=(--build-arg "$arg"); fi
+          done <<< "$BUILD_ARGS"
+          docker "${args[@]}" "$CONTEXT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Scan
+        id: scan
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          SEVERITY: ${{ inputs.trivy-severity }}
+          IGNORE_UNFIXED: ${{ inputs.ignore-unfixed }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          # shellcheck disable=SC2054 # the commas are Trivy's list syntax
+          args=(image --scanners vuln,secret --severity "$SEVERITY" --exit-code 0 --no-progress)
+          if [ "$IGNORE_UNFIXED" = true ]; then args+=(--ignore-unfixed); fi
+          if [ -f .trivyignore.yaml ]; then args+=(--ignorefile .trivyignore.yaml); fi
+          trivy "${args[@]}" --format json --output "$out/trivy-image.json" "$IMAGE"
+          trivy convert --format sarif --output "$out/trivy-image.sarif" "$out/trivy-image.json"
+          {
+            echo "### Image"
+            echo
+            trivy convert --format table "$out/trivy-image.json" | sed 's/^/    /'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "sarif=$out/trivy-image.sarif"
+            echo "tool=Trivy (image)"
+          } >> "$GITHUB_OUTPUT"
+      # Turns the scan step's SARIF into: a findings count (read by the summary job),
+      # a table in the job summary, and, when enforce-security is on, a failing exit.
+      # The scan step must have id "scan" and set outputs `sarif`, `tool` and,
+      # optionally, `levels` (space-separated SARIF levels to count; empty = all) and
+      # `base` (the directory the tool's paths are relative to; they are rewritten to
+      # be repo-root-relative so code scanning can place them).
+      - name: Report findings
+        if: always() && steps.scan.outcome == 'success'
+        env:
+          ENFORCE: ${{ inputs.enforce-security }}
+          SARIF: ${{ steps.scan.outputs.sarif }}
+          TOOL: ${{ steps.scan.outputs.tool }}
+          LEVELS: ${{ steps.scan.outputs.levels }}
+          BASE: ${{ steps.scan.outputs.base }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE" ]; then
+            jq --arg base "${BASE%/}" '
+              del(.runs[]?.originalUriBaseIds)
+              | (.runs[]?.results[]?.locations[]?.physicalLocation.artifactLocation) |=
+                  (del(.uriBaseId) | .uri |= (if $base == "." or test("^(/|[a-z]+:)") then . else $base + "/" + . end))' \
+              "$SARIF" > "$SARIF.rebased"
+            mv "$SARIF.rebased" "$SARIF"
+          fi
+          # shellcheck disable=SC2016 # $levels is a jq variable, not a shell one
+          filter='[.runs[]?.results[]? | select(($levels == "") or ((.level // "warning") as $l | $levels | split(" ") | index($l)))]'
+          count=$(jq --arg levels "$LEVELS" "$filter | length" "$SARIF")
+          echo "$count" > "$(dirname "$SARIF")/findings.txt"
+          {
+            echo "### $TOOL: $count finding(s)${LEVELS:+ (levels: $LEVELS)}"
+            if [ "$count" -gt 0 ]; then
+              echo
+              echo "| Level | Rule | Location |"
+              echo "|---|---|---|"
+              jq -r --arg levels "$LEVELS" "$filter"'[] | [(.level // "warning"), (.ruleId // "-"),
+                  ((.locations[0].physicalLocation.artifactLocation.uri // "-") + ":" + ((.locations[0].physicalLocation.region.startLine // "") | tostring))]
+                | map(tostring | gsub("\\|"; "\\|")) | "| \(.[0]) | `\(.[1])` | `\(.[2])` |"' "$SARIF" | head -n 100
+              if [ "$count" -gt 100 ]; then echo "| | $((count - 100)) more in the reports artifact | |"; fi
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$count" -gt 0 ]; then
+            if [ "$ENFORCE" = true ]; then
+              echo "::error::$TOOL reported $count finding(s)"
+              exit 1
+            fi
+            echo "::warning::$TOOL reported $count finding(s). Warn-only: set enforce-security: true to block merges."
+          fi
+      # Private repositories need GitHub Advanced Security to accept SARIF, and a repo
+      # with CodeQL "default setup" switched on rejects advanced-setup CodeQL results.
+      # Neither should fail the build: the same SARIF is always in the reports artifact.
+      - name: Upload SARIF to code scanning
+        id: upload-sarif
+        if: always() && inputs.upload-sarif && steps.scan.outputs.sarif != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: ${{ inputs.artifact-prefix }}/${{ github.job }}
+      - name: Note a failed SARIF upload
+        if: always() && steps.upload-sarif.outcome == 'failure'
+        run: |
+          echo "::warning::SARIF upload to code scanning failed (no Advanced Security, CodeQL default setup enabled, or missing security-events: write). Results are still in the reports artifact."
+          echo "> SARIF upload to code scanning failed; results are in the reports artifact only." >> "$GITHUB_STEP_SUMMARY"
+      - name: Generate SPDX SBOM of the image
+        if: inputs.sbom
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/reports/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      # Reports are staged under a directory named for the job, so every artifact
+      # unpacks to <job>/... . Downloaders then use merge-multiple and get the same
+      # layout whether one artifact matches or many; without merging, a single match
+      # is unpacked flat and the job name is lost.
+      - name: Stage reports
+        if: always()
+        env:
+          JOB: ${{ github.job }}
+        run: |
+          if [ -d "$RUNNER_TEMP/reports" ]; then
+            mkdir -p "$RUNNER_TEMP/upload/$JOB"
+            cp -R "$RUNNER_TEMP/reports/." "$RUNNER_TEMP/upload/$JOB/"
+          fi
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}.reports.${{ github.job }}
+          path: ${{ runner.temp }}/upload/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  summary:
+    name: Summary
+    if: always()
+    needs: [image]
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the code
+      pull-requests: write # post the sticky PR comment; capped by the caller's grant, so a caller that omits it just gets a 403-warn, not a failure
+    env:
+      REQUIRED_REPORTS: image
+    steps:
+      # The one check a caller needs to mark as required. It fails when any job
+      # failed, and when a scanner job "succeeded" without writing a report: that
+      # would be a gate that is green over nothing. The job needs `env.REQUIRED_REPORTS`,
+      # the space-separated ids of jobs that must leave a report whenever they run.
+      - name: Download reports
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ inputs.artifact-prefix }}.reports.*
+          path: ${{ runner.temp }}/all
+          merge-multiple: true # each artifact holds <job>/..., see upload-reports.yml
+      - name: Summarize
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          PREFIX: ${{ inputs.artifact-prefix }}
+          ENFORCE: ${{ inputs.enforce-security }}
+        run: |
+          set -euo pipefail
+          all="$RUNNER_TEMP/all"; mkdir -p "$all"
+          sonar="$RUNNER_TEMP/sonar-reports"; mkdir -p "$sonar"
+          # Build the report once into a file, then publish it to both the run's
+          # job summary and (in the "Comment on the PR" step) a sticky PR comment.
+          md="$RUNNER_TEMP/summary.md"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fail=0
+          {
+            echo "<!-- security-summary:$PREFIX -->"
+            echo "## $PREFIX: summary"
+            echo
+            if [ "$ENFORCE" = true ]; then
+              echo "Security findings **block** this check (enforce-security: true)."
+            else
+              echo "Security findings are **warn-only** (enforce-security: false). Lint, test and tool failures still block."
+            fi
+            echo
+            echo "| Job | Result | Findings | Report files |"
+            echo "|---|---|---|---|"
+          } > "$md"
+          for job in $(jq -r 'keys[]' <<<"$NEEDS"); do
+            result=$(jq -r --arg j "$job" '.[$j].result' <<<"$NEEDS")
+            dir="$all/$job"
+            files="-"; findings="-"
+            if [ -d "$dir" ] && [ -n "$(find "$dir" -type f -print -quit)" ]; then
+              files=$(find "$dir" -type f ! -name findings.txt -printf '%f\n' | sort | paste -sd' ' -)
+              if [ -f "$dir/findings.txt" ]; then findings=$(cat "$dir/findings.txt"); fi
+              # Flatten into one Sonar-ready bundle, prefixed by job so names can't collide.
+              find "$dir" -type f ! -name findings.txt -exec sh -c 'cp "$1" "$2/$3-$(basename "$1")"' _ {} "$sonar" "$job" \;
+            elif [ "$result" = success ] && [[ " $REQUIRED_REPORTS " == *" $job "* ]]; then
+              result="success, but NO REPORT: did the scanner run?"
+              fail=1
+            fi
+            case "$result" in failure|cancelled) fail=1 ;; esac
+            echo "| $job | $result | $findings | $files |" >> "$md"
+          done
+          {
+            echo
+            if [ "$fail" -ne 0 ]; then echo "**Result: failed** — see the failing job(s) above."; else echo "**Result: passed.**"; fi
+          } >> "$md"
+          # Human-readable findings, rendered from the collected SARIF: a how-to-fix
+          # table in the comment and job summary, and a self-contained HTML report
+          # uploaded as an artifact. The remediation text and docs links come from
+          # each tool's own rule metadata (help / helpUri).
+          report="$RUNNER_TEMP/report"; mkdir -p "$report"
+          tsv="$RUNNER_TEMP/findings.tsv"; : > "$tsv"
+          # shellcheck disable=SC2016 # $run/$rules/$r are jq variables, not shell
+          jqprog='
+            .runs[]? as $run
+            | ($run.tool.driver.name // "tool") as $tool
+            | ($run.tool.driver.rules // []) as $rules
+            | $run.results[]? | . as $r
+            | ($r.ruleId // $r.rule.id // "") as $rid
+            | (if ($r.ruleIndex // -1) >= 0 then ($rules[$r.ruleIndex] // {}) else ((first($rules[]? | select(.id==$rid))) // {}) end) as $rule
+            | ($r.level // $rule.defaultConfiguration.level // "warning") as $lvl
+            | ($r.locations[0].physicalLocation // {}) as $loc
+            | (($loc.artifactLocation.uri // "") + (if $loc.region.startLine then ":"+($loc.region.startLine|tostring) else "" end)) as $where
+            | ($rule.helpUri // "") as $uri
+            | (($r.message.text // "") | gsub("[\t\n]";" ")) as $msg
+            | (($rule.help.text // $rule.fullDescription.text // $rule.shortDescription.text // "") | gsub("[\t\n]";" ")) as $help
+            | [$lvl,$tool,$rid,$where,$uri,$msg,$help] | @tsv'
+          while IFS= read -r sf; do jq -r "$jqprog" "$sf" 2>/dev/null >> "$tsv" || true; done < <(find "$all" -name '*.sarif' 2>/dev/null)
+          n=$(wc -l < "$tsv" | tr -d ' '); n=${n:-0}
+          ordered="$RUNNER_TEMP/findings.ordered"
+          { grep -P '^error\t' "$tsv" || true; grep -P '^warning\t' "$tsv" || true; grep -Pv '^(error|warning)\t' "$tsv" || true; } > "$ordered"
+          htmlesc() { sed -e 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+          tab=$(printf '\t')
+          if [ "$n" -gt 0 ]; then
+            {
+              echo
+              echo "Full HTML report with remediation: the **$PREFIX.security-report** artifact on [this run]($run_url)."
+              echo
+              echo "<details><summary><b>Findings ($n)</b> — where and how to fix</summary>"
+              echo
+              echo "| Sev | Location | Issue | How to fix |"
+              echo "|---|---|---|---|"
+            } >> "$md"
+            head -100 "$ordered" | while IFS="$tab" read -r lvl tool rid where uri msg help; do
+              fix="$help"; if [ -n "$uri" ]; then fix="$help [docs]($uri)"; fi
+              # shellcheck disable=SC2016 # the backticks are literal markdown, not a command substitution
+              printf '| %s | `%s` | %s <sub>%s/%s</sub> | %s |\n' "$lvl" "$where" "$msg" "$tool" "$rid" "$fix"
+            done >> "$md"
+            if [ "$n" -gt 100 ]; then echo "| … | | $((n-100)) more in the HTML report | |" >> "$md"; fi
+            echo "</details>" >> "$md"
+            rows="$RUNNER_TEMP/rows.html"; : > "$rows"
+            while IFS="$tab" read -r lvl tool rid where uri msg help; do
+              em=$(printf '%s' "$msg" | htmlesc); eh=$(printf '%s' "$help" | htmlesc); ew=$(printf '%s' "$where" | htmlesc)
+              link=""; if [ -n "$uri" ]; then link=" <a href=\"$uri\">docs ↗</a>"; fi
+              printf '<tr><td class="%s">%s</td><td>%s<br><code>%s</code></td><td><code>%s</code></td><td>%s</td><td>%s%s</td></tr>\n' "$lvl" "$lvl" "$tool" "$rid" "$ew" "$em" "$eh" "$link"
+            done < "$ordered" >> "$rows"
+            {
+              echo '<!doctype html><meta charset="utf-8"><title>'"$PREFIX"' security report</title>'
+              echo '<style>body{font:14px system-ui,sans-serif;margin:2rem;color:#1a1a2e}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;padding:.5rem .6rem;text-align:left;vertical-align:top}th{background:#f3f3f7}code{background:#f3f3f7;padding:.1em .3em;border-radius:3px}.error{color:#b3261e;font-weight:700}.warning{color:#8a5a00;font-weight:700}.note,.info{color:#555}a{color:#6034c2}</style>'
+              echo "<h1>$PREFIX security report</h1><p>$n finding(s) · run <a href=\"$run_url\">$GITHUB_RUN_ID</a></p>"
+              echo '<table><tr><th>Severity</th><th>Tool / Rule</th><th>Location</th><th>Issue</th><th>How to fix</th></tr>'
+              cat "$rows"
+              echo '</table>'
+            } > "$report/$PREFIX-security-report.html"
+          else
+            { echo; echo "_No scanner findings._"; } >> "$md"
+          fi
+          {
+            echo
+            echo "SonarQube: every report above is bundled, ready for import, in the **$PREFIX.sonar-reports** artifact."
+            echo
+            echo "_Machine reports (SARIF/JSON) are in the run's artifacts; full logs in the [workflow run]($run_url)._"
+          } >> "$md"
+          cat "$md" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::one or more checks failed; see the summary table"
+            exit 1
+          fi
+      # Post the same summary as a single sticky PR comment (created once, updated on
+      # every later run), the way a human skims a review. Best-effort: it needs the
+      # caller to grant `pull-requests: write`; without it the step warns and the
+      # gate is unaffected. Runs on always() so a failure report is posted too.
+      - name: Comment on the PR
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          PREFIX: ${{ inputs.artifact-prefix }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          body="$RUNNER_TEMP/summary.md"
+          [ -f "$body" ] || { echo "no summary to post"; exit 0; }
+          marker="<!-- security-summary:$PREFIX -->"
+          # --slurp so the filter runs once over all pages (a per-page --jq would
+          # emit one id plus a null per empty page). Match only this workflow's own
+          # bot comment, never a human quoting a past summary.
+          id=$(gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" \
+                 --jq "[.[][] | select(.user.login==\"github-actions[bot]\" and (.body | contains(\"$marker\")))] | .[0].id // empty" 2>/dev/null || true)
+          if [ -n "${id:-}" ] && [ "$id" != "null" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$body" >/dev/null \
+              && echo "updated the existing $PREFIX summary comment ($id)" \
+              || echo "::warning::could not update the PR summary comment — grant 'pull-requests: write' in the caller"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$body" >/dev/null \
+              && echo "posted the $PREFIX summary comment" \
+              || echo "::warning::could not post the PR summary comment — grant 'pull-requests: write' in the caller"
+          fi
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}.security-report
+          path: ${{ runner.temp }}/report/
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Upload Sonar-ready reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}.sonar-reports
+          path: ${{ runner.temp }}/sonar-reports/
+          if-no-files-found: ignore
+          retention-days: 30

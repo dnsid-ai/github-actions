@@ -1,0 +1,32 @@
+# Copy to .github/workflows/dast.yml. Runs against a live environment, so it is
+# manual and scheduled rather than per-PR.
+#
+# Get written authorization from the system's owner before pointing this at
+# anything. Start with a dev or staging environment, never production without sign-off.
+name: DAST
+
+on:
+  workflow_dispatch:
+    inputs:
+      target-url:
+        description: URL to scan
+        default: https://staging.example.com
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dast:
+    uses: <org>/github-actions/.github/workflows/security-dast.yml@<SHA> # v1.0.0
+    permissions:
+      contents: read # check out the code (for the ZAP rules file)
+      pull-requests: write # required: the Summary job posts a sticky PR comment
+    with:
+      target-url: ${{ inputs.target-url || 'https://staging.example.com' }}
+      # zap-rules-file: .zap/rules.tsv
+      # openapi-url: https://staging.example.com/openapi.json   # ACTIVE scan

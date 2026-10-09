@@ -1,0 +1,175 @@
+# DAST: scans a *running* site from the outside, the way an attacker would.
+# An unauthenticated perimeter scan with the OWASP ZAP baseline (passive:
+# headers, cookie flags, information leaks) and Nuclei (exposed debug
+# endpoints, default paths, misconfigurations).
+#
+# ONLY point this at systems you are authorized to test, with written
+# sign-off from whoever owns them. The ZAP baseline is passive, but
+# Nuclei sends crafted requests, and zap-api-scan (openapi-url) is an ACTIVE
+# scan that sends attack payloads.
+#
+#   on: { workflow_dispatch: {}, schedule: [{ cron: "0 6 * * 1" }] }
+#   jobs:
+#     dast:
+#       uses: <org>/github-actions/.github/workflows/security-dast.yml@<sha> # v1
+#       permissions: { contents: read }
+#       with:
+#         target-url: https://staging.example.com
+name: DAST
+
+on:
+  workflow_call:
+    inputs:
+      target-url:
+        description: Base URL to scan. Must be reachable from the runner.
+        type: string
+        required: true
+      runs-on:
+        description: Runner label. Must be Linux x64 with Docker.
+        type: string
+        default: ubuntu-24.04
+      artifact-prefix:
+        description: Prefix for artifact names.
+        type: string
+        default: dast
+      enforce-security:
+        description: When false (the default), findings are reported but do not fail the run.
+        type: boolean
+        default: false
+      zap:
+        description: Run the OWASP ZAP baseline (passive) scan.
+        type: boolean
+        default: true
+      zap-rules-file:
+        description: ZAP rules TSV (IGNORE/WARN/FAIL per rule id), relative to the repository root.
+        type: string
+        default: ""
+      openapi-url:
+        description: OpenAPI spec URL. When set, also runs zap-api-scan, an ACTIVE scan of every documented operation.
+        type: string
+        default: ""
+      nuclei:
+        description: Run Nuclei.
+        type: boolean
+        default: true
+      nuclei-tags:
+        description: Comma-separated Nuclei template tags.
+        type: string
+        default: misconfig,exposure
+      nuclei-severity:
+        description: Comma-separated Nuclei severities.
+        type: string
+        default: low,medium,high,critical
+      rate-limit:
+        description: Maximum Nuclei requests per second.
+        type: number
+        default: 10
+
+permissions: {}
+
+jobs:
+  zap:
+    name: OWASP ZAP
+    if: inputs.zap
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 60
+    permissions:
+      contents: read # check out the code
+    steps:
+      # @include checkout.yml
+      - name: Scan
+        id: scan
+        env:
+          TARGET: ${{ inputs.target-url }}
+          RULES: ${{ inputs.zap-rules-file }}
+          OPENAPI: ${{ inputs.openapi-url }}
+          # ghcr.io/zaproxy/zaproxy:stable, pinned by digest (2026-08-07 build).
+          ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          wrk="$RUNNER_TEMP/zap"; mkdir -p "$wrk"
+          chmod 0777 "$wrk" # the container runs as the unprivileged "zap" user
+          extra=()
+          if [ -n "$RULES" ]; then cp "$RULES" "$wrk/rules.tsv"; extra+=(-c rules.tsv); fi
+          zap() {
+            # Exit codes: 0 pass, 1 FAIL rules hit, 2 warnings (suppressed by -I), 3 error.
+            local rc=0
+            docker run --rm --network host -v "$wrk:/zap/wrk:rw" "$ZAP_IMAGE" "$@" -I || rc=$?
+            if [ "$rc" -ge 3 ]; then echo "::error::ZAP failed (exit $rc)"; exit 1; fi
+          }
+          zap zap-baseline.py -t "$TARGET" -J baseline.json -r baseline.html "${extra[@]}"
+          reports=("$wrk/baseline.json")
+          if [ -n "$OPENAPI" ]; then
+            zap zap-api-scan.py -t "$OPENAPI" -f openapi -J api.json -r api.html "${extra[@]}"
+            reports+=("$wrk/api.json")
+          fi
+          cp "$wrk"/*.html "$wrk"/*.json "$out/"
+          # ZAP risk 3/2/1/0 = high/medium/low/informational -> error/warning/note/none.
+          jq -s '{version: "2.1.0", "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+                  runs: [{tool: {driver: {name: "OWASP ZAP", informationUri: "https://www.zaproxy.org"}},
+                    results: [.[].site[]?.alerts[]? | {
+                      ruleId: "ZAP-\(.pluginid)",
+                      level: ({"3": "error", "2": "warning", "1": "note"}[.riskcode] // "none"),
+                      message: {text: "\(.name // .alert) (\(.riskdesc)): \(.count // "?") instance(s)"},
+                      locations: [{physicalLocation: {artifactLocation: {uri: (.instances[0].uri // "-")}}}]}]}]}' \
+            "${reports[@]}" > "$out/zap.sarif"
+          {
+            echo "sarif=$out/zap.sarif"
+            echo "tool=OWASP ZAP"
+            echo "levels=error warning"
+          } >> "$GITHUB_OUTPUT"
+      # @include report-sarif.yml
+      # @include upload-reports.yml
+
+  nuclei:
+    name: Nuclei
+    if: inputs.nuclei
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 60
+    permissions:
+      contents: read # check out the code
+    steps:
+      # @include install-nuclei.yml
+      - name: Scan
+        id: scan
+        env:
+          TARGET: ${{ inputs.target-url }}
+          TAGS: ${{ inputs.nuclei-tags }}
+          SEVERITY: ${{ inputs.nuclei-severity }}
+          RATE: ${{ inputs.rate-limit }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          # Downloads the community templates on first run.
+          nuclei -u "$TARGET" -tags "$TAGS" -severity "$SEVERITY" -rate-limit "$RATE" \
+            -jsonl -o "$out/nuclei.jsonl" -silent -no-color
+          touch "$out/nuclei.jsonl"
+          jq -s '{version: "2.1.0", "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+                  runs: [{tool: {driver: {name: "Nuclei", informationUri: "https://github.com/projectdiscovery/nuclei"}},
+                    results: [.[] | {
+                      ruleId: .["template-id"],
+                      level: ({"critical": "error", "high": "error", "medium": "warning", "low": "note"}[.info.severity] // "none"),
+                      message: {text: "\(.info.name) [\(.info.severity)]"},
+                      locations: [{physicalLocation: {artifactLocation: {uri: (.["matched-at"] // .host)}}}]}]}]}' \
+            "$out/nuclei.jsonl" > "$out/nuclei.sarif"
+          {
+            echo "sarif=$out/nuclei.sarif"
+            echo "tool=Nuclei"
+          } >> "$GITHUB_OUTPUT"
+      # @include report-sarif.yml
+      # @include upload-reports.yml
+
+  summary:
+    name: Summary
+    if: always()
+    needs: [zap, nuclei]
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the code
+      pull-requests: write # post the sticky PR comment; capped by the caller's grant, so a caller that omits it just gets a 403-warn, not a failure
+    env:
+      REQUIRED_REPORTS: zap nuclei
+    steps:
+      # @include summary-steps.yml

@@ -1,0 +1,29 @@
+# Copy to .github/workflows/image.yml in the repo that uses it. Replace <SHA> with the
+# commit of the github-actions release you are adopting (pin the SHA, not a
+# tag or branch), and keep the version comment beside it.
+#
+# Then make "image / Summary" a required status check on main. It fails if any job
+# fails, or if a scanner silently produced no report.
+name: Image scan
+
+on:
+  pull_request:
+    paths: [Dockerfile, go.mod, go.sum, web/package-lock.json]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    uses: <org>/github-actions/.github/workflows/security-container.yml@<SHA> # v1.0.0
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+      pull-requests: write # required: the Summary job posts a sticky PR comment
+    with:
+      dockerfile: Dockerfile
+      enforce-security: false

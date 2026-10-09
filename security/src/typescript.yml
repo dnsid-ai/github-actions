@@ -1,0 +1,269 @@
+# TypeScript / JavaScript: lint, typecheck, test, and security scanning in one
+# reusable workflow.
+#
+#   jobs:
+#     typescript:
+#       uses: <org>/github-actions/.github/workflows/security-typescript.yml@<sha> # v1
+#       permissions: { contents: read, security-events: write, actions: read }
+#
+# Mark "<caller job> / Summary" as the required check. See README.md.
+name: TypeScript
+
+on:
+  workflow_call:
+    inputs:
+      # @include inputs-common.yml
+      artifact-prefix:
+        description: Prefix for artifact names. Set it when one run calls this workflow more than once.
+        type: string
+        default: typescript
+      node-version:
+        description: Node.js version, used when node-version-file is empty.
+        type: string
+        default: lts/*
+      node-version-file:
+        description: File to read the Node.js version from (e.g. .nvmrc), relative to working-directory.
+        type: string
+        default: ""
+      ignore-scripts:
+        description: Install with lifecycle scripts disabled (npm ci --ignore-scripts).
+        type: boolean
+        default: true
+      rebuild:
+        description: Space-separated packages whose install scripts must run (e.g. "esbuild"); rebuilt after install.
+        type: string
+        default: ""
+      allowed-install-scripts:
+        description: >-
+          Space-separated packages allowed to declare install scripts in
+          package-lock.json. Any other package that does is reported as a finding.
+        type: string
+        default: ""
+      lint-script:
+        description: package.json script for linting. Skipped if the script doesn't exist.
+        type: string
+        default: lint
+      format-script:
+        description: package.json script that checks formatting. Skipped if the script doesn't exist.
+        type: string
+        default: format:check
+      typecheck-script:
+        description: package.json script for typechecking. Without one, `tsc --noEmit` runs when there is a tsconfig.json.
+        type: string
+        default: typecheck
+      test-script:
+        description: package.json script for tests. Skipped if the script doesn't exist.
+        type: string
+        default: test
+      coverage-file:
+        description: LCOV file the tests write, relative to working-directory (collected for SonarQube).
+        type: string
+        default: coverage/lcov.info
+      eslint-report:
+        description: ESLint JSON report the lint script writes, relative to working-directory (collected for SonarQube).
+        type: string
+        default: ""
+      semgrep-rules:
+        description: Space-separated Semgrep registry rulesets.
+        type: string
+        default: p/typescript p/javascript p/nodejsscan p/secrets
+    secrets:
+      SONAR_TOKEN:
+        required: false
+
+permissions: {}
+
+jobs:
+  lint:
+    name: Lint, format and typecheck
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the code
+    steps:
+      # @include checkout.yml
+      # @include setup-node-project.yml
+      - name: Lint, format check, typecheck
+        env:
+          WD: ${{ inputs.working-directory }}
+          PM: ${{ steps.env.outputs.pm }}
+          LINT: ${{ inputs.lint-script }}
+          FORMAT: ${{ inputs.format-script }}
+          TYPECHECK: ${{ inputs.typecheck-script }}
+          ESLINT_REPORT: ${{ inputs.eslint-report }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          cd "$WD"
+          has() { node -e 'process.exit(require("./package.json").scripts?.[process.argv[1]] ? 0 : 1)' "$1"; }
+          status=0
+          ran=()
+          if [ -n "$LINT" ] && has "$LINT"; then "$PM" run "$LINT" || status=1; ran+=("$LINT"); fi
+          if [ -n "$FORMAT" ] && has "$FORMAT"; then "$PM" run "$FORMAT" || status=1; ran+=("$FORMAT"); fi
+          if [ -n "$TYPECHECK" ] && has "$TYPECHECK"; then
+            "$PM" run "$TYPECHECK" || status=1; ran+=("$TYPECHECK")
+          elif [ -f tsconfig.json ] && [ -x node_modules/.bin/tsc ]; then
+            node_modules/.bin/tsc --noEmit -p . || status=1; ran+=("tsc --noEmit")
+          fi
+          if [ -n "$ESLINT_REPORT" ] && [ -f "$ESLINT_REPORT" ]; then cp "$ESLINT_REPORT" "$out/eslint.json"; fi
+          if [ "${#ran[@]}" -eq 0 ]; then
+            echo "::warning::No lint, format or typecheck script found, and no tsconfig.json: nothing was checked."
+          fi
+          echo "### Lint: ran ${ran[*]:-nothing}" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      # @include upload-reports.yml
+
+  test:
+    name: Test
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the code
+    steps:
+      # @include checkout.yml
+      # @include setup-node-project.yml
+      - name: Test
+        env:
+          WD: ${{ inputs.working-directory }}
+          PM: ${{ steps.env.outputs.pm }}
+          TEST: ${{ inputs.test-script }}
+          COVERAGE: ${{ inputs.coverage-file }}
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          cd "$WD"
+          echo "### TypeScript test" >> "$GITHUB_STEP_SUMMARY"
+          # GitHub starts `run:` steps with `bash -e`, and `set -uo pipefail`
+          # does not clear that inherited `-e`. Turn it off so a failing test
+          # run does not abort before its output is captured and summarised
+          # (setup above stays fatal). The real test exit is returned at the
+          # end, so the gate still fails — only reporting is made non-fatal.
+          set +e
+          rc=0
+          if [ -n "$TEST" ] && node -e 'process.exit(require("./package.json").scripts?.[process.argv[1]] ? 0 : 1)' "$TEST"; then
+            log="$out/test.log"
+            "$PM" run "$TEST" 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            if [ "$rc" -eq 0 ]; then
+              echo "- \`$TEST\`: pass" >> "$GITHUB_STEP_SUMMARY"
+            else
+              # The failing tests and assertion lines — the "what went wrong"
+              # that was previously only in the raw log.
+              { echo "- \`$TEST\`: **FAIL**"; echo ""; echo '```'
+                grep -E '(FAIL|✕|×|✗|●|AssertionError|Error:|Expected|Received|[0-9]+ failed)' "$log" | head -60
+                echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+            fi
+          else
+            echo "::warning::No '$TEST' script in package.json: no tests ran."
+            echo "- no \`$TEST\` script; no tests ran" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -n "$COVERAGE" ] && [ -f "$COVERAGE" ]; then cp "$COVERAGE" "$out/lcov.info"; fi
+          exit "$rc"
+      # @include upload-reports.yml
+
+  deps:
+    name: Dependency vulnerabilities and install scripts (osv-scanner)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      # @include install-osv-scanner.yml
+      - name: Scan
+        id: scan
+        env:
+          WD: ${{ inputs.working-directory }}
+          ALLOWED: ${{ inputs.allowed-install-scripts }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          lock=""
+          for f in package-lock.json pnpm-lock.yaml; do
+            if [ -f "$WD/$f" ]; then lock="$WD/$f"; break; fi
+          done
+          if [ -z "$lock" ]; then
+            echo "::error::No package-lock.json or pnpm-lock.yaml in $WD"
+            exit 1
+          fi
+          # 0 = clean, 1 = vulnerabilities found, 128 = no packages; anything else is a tool error.
+          rc=0
+          osv-scanner scan source --lockfile="$lock" --format sarif --output-file "$out/osv-scanner.sarif" || rc=$?
+          case "$rc" in
+            0|1) ;;
+            128) jq -n '{version: "2.1.0", runs: [{tool: {driver: {name: "osv-scanner"}}, results: []}]}' > "$out/osv-scanner.sarif" ;;
+            *) echo "::error::osv-scanner failed (exit $rc)"; exit 1 ;;
+          esac
+          # Packages that declare install scripts (package-lock only). Each one not on
+          # the allowlist becomes a finding, so a dependency that quietly gains a
+          # postinstall shows up in review.
+          if [ "$(basename "$lock")" = package-lock.json ]; then
+            jq --arg allowed "$ALLOWED" --arg lock "$lock" '
+              ($allowed | split(" ") | map(select(. != ""))) as $ok
+              | [(.packages // {}) | to_entries[] | select(.value.hasInstallScript == true)
+                 | .key | sub("^.*node_modules/"; "")] | unique
+              | map(select(IN($ok[]) | not))
+              | map({ruleId: "npm-install-script", level: "warning",
+                     message: {text: "\(.) declares an install script. If that is expected, add it to allowed-install-scripts."},
+                     locations: [{physicalLocation: {artifactLocation: {uri: $lock}, region: {startLine: 1}}}]})' \
+              "$lock" > "$RUNNER_TEMP/install-scripts.json"
+            jq --slurpfile extra "$RUNNER_TEMP/install-scripts.json" \
+              '.runs[0].results = ((.runs[0].results // []) + $extra[0])' "$out/osv-scanner.sarif" > "$RUNNER_TEMP/osv.sarif"
+            mv "$RUNNER_TEMP/osv.sarif" "$out/osv-scanner.sarif"
+          fi
+          {
+            echo "sarif=$out/osv-scanner.sarif"
+            echo "tool=osv-scanner (+ install-script check)"
+          } >> "$GITHUB_OUTPUT"
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  codeql:
+    name: SAST (CodeQL)
+    if: inputs.codeql
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 45
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          source-root: ${{ inputs.working-directory }}
+          queries: ${{ inputs.codeql-queries }}
+      - name: Analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: ${{ inputs.artifact-prefix }}/codeql
+          upload: never
+          output: ${{ runner.temp }}/codeql
+      # @include codeql-collect.yml
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  # @include jobs-shared-security.yml
+  # @include jobs-shared-supply-chain.yml
+  # @include job-sonar.yml
+
+  summary:
+    name: Summary
+    if: always()
+    needs: [lint, test, deps, codeql, semgrep, secrets, trivy, workflow-audit, dependency-review, sbom, sonar]
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the code
+      pull-requests: write # post the sticky PR comment; capped by the caller's grant, so a caller that omits it just gets a 403-warn, not a failure
+    env:
+      REQUIRED_REPORTS: deps codeql semgrep secrets trivy workflow-audit
+    steps:
+      # @include summary-steps.yml

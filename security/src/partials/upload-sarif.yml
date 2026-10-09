@@ -1,0 +1,16 @@
+# Private repositories need GitHub Advanced Security to accept SARIF, and a repo
+# with CodeQL "default setup" switched on rejects advanced-setup CodeQL results.
+# Neither should fail the build: the same SARIF is always in the reports artifact.
+- name: Upload SARIF to code scanning
+  id: upload-sarif
+  if: always() && inputs.upload-sarif && steps.scan.outputs.sarif != ''
+  continue-on-error: true
+  uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+  with:
+    sarif_file: ${{ steps.scan.outputs.sarif }}
+    category: ${{ inputs.artifact-prefix }}/${{ github.job }}
+- name: Note a failed SARIF upload
+  if: always() && steps.upload-sarif.outcome == 'failure'
+  run: |
+    echo "::warning::SARIF upload to code scanning failed (no Advanced Security, CodeQL default setup enabled, or missing security-events: write). Results are still in the reports artifact."
+    echo "> SARIF upload to code scanning failed; results are in the reports artifact only." >> "$GITHUB_STEP_SUMMARY"

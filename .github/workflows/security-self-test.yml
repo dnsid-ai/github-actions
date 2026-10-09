@@ -1,0 +1,144 @@
+# Runs every reusable workflow against the fixtures in security/tests/fixtures/, then
+# checks that each scanner found the canary planted for it. A scanner that runs
+# but loads no rules would otherwise pass forever.
+name: Security self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: security-self-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    uses: ./.github/workflows/security-go.yml
+    permissions:
+      contents: read # check out the code
+      security-events: write # required by the called workflow's jobs
+      actions: read # required by the called workflow's jobs
+      pull-requests: write # the Summary job posts a sticky PR comment
+    with:
+      working-directory: security/tests/fixtures/go
+      upload-sarif: false
+      sbom: true
+
+  python-uv:
+    uses: ./.github/workflows/security-python.yml
+    permissions:
+      contents: read # check out the code
+      security-events: write # required by the called workflow's jobs
+      actions: read # required by the called workflow's jobs
+      pull-requests: write # the Summary job posts a sticky PR comment
+    with:
+      working-directory: security/tests/fixtures/python-uv
+      artifact-prefix: python-uv
+      upload-sarif: false
+
+  python-pip:
+    uses: ./.github/workflows/security-python.yml
+    permissions:
+      contents: read # check out the code
+      security-events: write # required by the called workflow's jobs
+      actions: read # required by the called workflow's jobs
+      pull-requests: write # the Summary job posts a sticky PR comment
+    with:
+      working-directory: security/tests/fixtures/python-pip
+      artifact-prefix: python-pip
+      upload-sarif: false
+      codeql: false
+
+  typescript:
+    uses: ./.github/workflows/security-typescript.yml
+    permissions:
+      contents: read # check out the code
+      security-events: write # required by the called workflow's jobs
+      actions: read # required by the called workflow's jobs
+      pull-requests: write # the Summary job posts a sticky PR comment
+    with:
+      working-directory: security/tests/fixtures/typescript
+      upload-sarif: false
+
+  iac:
+    uses: ./.github/workflows/security-iac.yml
+    permissions:
+      contents: read # check out the code
+      security-events: write # required by the called workflow's jobs
+      actions: read # required by the called workflow's jobs
+      pull-requests: write # the Summary job posts a sticky PR comment
+    with:
+      working-directory: security/tests/fixtures/iac
+      manifests-path: k8s
+      upload-sarif: false
+
+  container:
+    uses: ./.github/workflows/security-container.yml
+    permissions:
+      contents: read # check out the code
+      security-events: write # required by the called workflow's jobs
+      actions: read # required by the called workflow's jobs
+      pull-requests: write # the Summary job posts a sticky PR comment
+    with:
+      context: security/tests/fixtures/container
+      dockerfile: security/tests/fixtures/container/Dockerfile
+      upload-sarif: false
+
+  canaries:
+    name: Canaries were caught
+    if: always()
+    needs: [go, python-uv, python-pip, typescript, iac, container]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # download this run's artifacts
+    steps:
+      - name: Download reports
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "*.reports.*"
+          path: ${{ runner.temp }}/all
+      - name: Check each planted finding was reported
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          all="$RUNNER_TEMP/all"
+          # <artifact>  <what the fixture plants>
+          expect=(
+            "go.reports.semgrep|crypto/md5 in checksum.go"
+            "python-uv.reports.semgrep|hashlib.md5 in sample/__init__.py"
+            "python-uv.reports.lint|ruff S324 in sample/__init__.py"
+            "python-pip.reports.lint|ruff S324 in sample/__init__.py"
+            "typescript.reports.semgrep|createHash(md5) in checksum.ts"
+            "iac.reports.terraform|unused variable in main.tf"
+            "iac.reports.kubernetes|privileged container, tag-only image"
+            "iac.reports.shell|unquoted expansion in deploy.sh"
+            "iac.reports.trivy|privileged container in deployment.yaml"
+            "iac.reports.semgrep|privileged container in deployment.yaml"
+          )
+          fail=0
+          echo "| Report | Canary | Findings |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for entry in "${expect[@]}"; do
+            name=${entry%%|*}; canary=${entry#*|}
+            # Artifact <prefix>.reports.<job> unpacks to <artifact>/<job>/ (see upload-reports.yml).
+            n=$(cat "$all/$name/${name##*.}/findings.txt" 2>/dev/null || echo missing)
+            echo "| $name | $canary | $n |" >> "$GITHUB_STEP_SUMMARY"
+            if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -eq 0 ]; then
+              echo "::error::$name did not report its canary ($canary): findings=$n"
+              fail=1
+            fi
+          done
+          # The called workflows run warn-only, so every one of them must be green
+          # despite the canaries: findings must not fail a warn-only build.
+          bad=$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"' <<<"$NEEDS")
+          if [ -n "$bad" ]; then
+            echo "::error::workflows not green in warn-only mode: $bad"
+            fail=1
+          fi
+          exit "$fail"

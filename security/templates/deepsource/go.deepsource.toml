@@ -1,0 +1,19 @@
+version = 1
+
+test_patterns = ["**/*_test.go"]
+exclude_patterns = ["vendor/**", "**/*.pb.go", "**/zz_generated*.go"]
+
+[[analyzers]]
+name = "go"
+
+  [analyzers.meta]
+  import_root = "github.com/ORG/REPO"
+
+[[analyzers]]
+name = "secrets"
+
+[[analyzers]]
+name = "docker"
+
+[[analyzers]]
+name = "shell"

@@ -1,0 +1,38 @@
+- name: Set up Go
+  uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+  with:
+    go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+    cache: false
+- name: Configure private modules
+  if: inputs.go-private != ''
+  env:
+    PATTERN: ${{ inputs.go-private }}
+    TOKEN: ${{ secrets.GO_PRIVATE_TOKEN }}
+  run: |
+    set -euo pipefail
+    if [ -z "$TOKEN" ]; then
+      echo "::error::go-private is set but the GO_PRIVATE_TOKEN secret was not passed"
+      exit 1
+    fi
+    echo "GOPRIVATE=$PATTERN" >> "$GITHUB_ENV"
+    git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+- name: Drop local replace directives
+  if: inputs.go-drop-local-replaces
+  env:
+    WD: ${{ inputs.working-directory }}
+    MODULES: ${{ inputs.go-modules }}
+  run: |
+    set -euo pipefail
+    cd "$WD"
+    for mod in $MODULES; do
+      (
+        cd "$mod"
+        for old in $(go mod edit -json | jq -r '.Replace[]? | select(.New.Path | test("^(\\.{1,2}/|/)")) | .Old.Path + (if .Old.Version then "@" + .Old.Version else "" end)'); do
+          echo "::notice::$mod: dropping local replace for $old; building against the version go.mod requires"
+          go mod edit -dropreplace="$old"
+        done
+      )
+    done
+    # go.sum has no entries for a module that was replaced by a local directory, so
+    # let the go command add them. Each is verified against the checksum database.
+    echo "GOFLAGS=-mod=mod" >> "$GITHUB_ENV"

@@ -1,0 +1,48 @@
+# Turns the scan step's SARIF into: a findings count (read by the summary job),
+# a table in the job summary, and, when enforce-security is on, a failing exit.
+# The scan step must have id "scan" and set outputs `sarif`, `tool` and,
+# optionally, `levels` (space-separated SARIF levels to count; empty = all) and
+# `base` (the directory the tool's paths are relative to; they are rewritten to
+# be repo-root-relative so code scanning can place them).
+- name: Report findings
+  if: always() && steps.scan.outcome == 'success'
+  env:
+    ENFORCE: ${{ inputs.enforce-security }}
+    SARIF: ${{ steps.scan.outputs.sarif }}
+    TOOL: ${{ steps.scan.outputs.tool }}
+    LEVELS: ${{ steps.scan.outputs.levels }}
+    BASE: ${{ steps.scan.outputs.base }}
+  run: |
+    set -euo pipefail
+    if [ -n "$BASE" ]; then
+      jq --arg base "${BASE%/}" '
+        del(.runs[]?.originalUriBaseIds)
+        | (.runs[]?.results[]?.locations[]?.physicalLocation.artifactLocation) |=
+            (del(.uriBaseId) | .uri |= (if $base == "." or test("^(/|[a-z]+:)") then . else $base + "/" + . end))' \
+        "$SARIF" > "$SARIF.rebased"
+      mv "$SARIF.rebased" "$SARIF"
+    fi
+    # shellcheck disable=SC2016 # $levels is a jq variable, not a shell one
+    filter='[.runs[]?.results[]? | select(($levels == "") or ((.level // "warning") as $l | $levels | split(" ") | index($l)))]'
+    count=$(jq --arg levels "$LEVELS" "$filter | length" "$SARIF")
+    echo "$count" > "$(dirname "$SARIF")/findings.txt"
+    {
+      echo "### $TOOL: $count finding(s)${LEVELS:+ (levels: $LEVELS)}"
+      if [ "$count" -gt 0 ]; then
+        echo
+        echo "| Level | Rule | Location |"
+        echo "|---|---|---|"
+        jq -r --arg levels "$LEVELS" "$filter"'[] | [(.level // "warning"), (.ruleId // "-"),
+            ((.locations[0].physicalLocation.artifactLocation.uri // "-") + ":" + ((.locations[0].physicalLocation.region.startLine // "") | tostring))]
+          | map(tostring | gsub("\\|"; "\\|")) | "| \(.[0]) | `\(.[1])` | `\(.[2])` |"' "$SARIF" | head -n 100
+        if [ "$count" -gt 100 ]; then echo "| | $((count - 100)) more in the reports artifact | |"; fi
+      fi
+      echo
+    } >> "$GITHUB_STEP_SUMMARY"
+    if [ "$count" -gt 0 ]; then
+      if [ "$ENFORCE" = true ]; then
+        echo "::error::$TOOL reported $count finding(s)"
+        exit 1
+      fi
+      echo "::warning::$TOOL reported $count finding(s). Warn-only: set enforce-security: true to block merges."
+    fi

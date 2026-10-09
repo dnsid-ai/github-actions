@@ -1,0 +1,42 @@
+# Runs only once a SonarQube server exists (sonar-host-url set). Until then the
+# summary job publishes the same reports as the <prefix>.sonar-reports artifact.
+sonar:
+  name: SonarQube
+  if: always() && inputs.sonar-host-url != ''
+  needs: [lint, test, deps, semgrep, secrets, trivy, workflow-audit]
+  runs-on: ${{ inputs.runs-on }}
+  timeout-minutes: 20
+  permissions:
+    contents: read # check out the code
+  steps:
+    # @include checkout-history.yml
+    - name: Download reports
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        pattern: ${{ inputs.artifact-prefix }}.reports.*
+        path: ${{ runner.temp }}/all
+        merge-multiple: true
+    - name: Map reports to Sonar properties
+      id: props
+      run: |
+        set -euo pipefail
+        all="$RUNNER_TEMP/all"; mkdir -p "$all"
+        list() { find "$all" -type f -name "$1" | sort | paste -sd, -; }
+        args=()
+        add() { if [ -n "$2" ]; then args+=("-D$1=$2"); fi; }
+        add sonar.sarifReportPaths "$(list '*.sarif')"
+        add sonar.go.coverage.reportPaths "$(list 'coverage-*.out')"
+        add sonar.go.golangci-lint.reportPaths "$(list 'golangci-*.xml')"
+        add sonar.python.coverage.reportPaths "$(list 'coverage.xml')"
+        add sonar.python.ruff.reportPaths "$(list 'ruff.json')"
+        add sonar.javascript.lcov.reportPaths "$(list 'lcov.info')"
+        add sonar.eslint.reportPaths "$(list 'eslint.json')"
+        echo "args=${args[*]}" >> "$GITHUB_OUTPUT"
+    - name: Scan
+      uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+      with:
+        projectBaseDir: ${{ inputs.working-directory }}
+        args: ${{ steps.props.outputs.args }} ${{ inputs.sonar-args }}

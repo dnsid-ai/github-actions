@@ -1,0 +1,8 @@
+rules:
+  self-repository:
+    # security-self-test.yml calls this repo's workflows with ./ rather than GitHub's newer
+    # $/ syntax (July 2026) because actionlint (1.7.12, the latest) rejects $/ and
+    # would fail the lint gate. For a reusable-workflow job, ./ already resolves
+    # at the commit that triggered the run. Revisit when actionlint supports $/.
+    ignore:
+      - security-self-test.yml

@@ -1,0 +1,14 @@
+# kube-linter 0.8.3, pinned by SHA-256 (verified against the release's published
+# checksums when it ships one). Bump VERSION and SHA256 together.
+- name: Install kube-linter
+  env:
+    VERSION: "0.8.3"
+    SHA256: "1a6d8419b11971372971fdbc22682b684ebfb7cf1c39591662d1b6ca736c41df"
+  run: |
+    set -euo pipefail
+    bin="$RUNNER_TEMP/bin"; mkdir -p "$bin"
+    pkg="$RUNNER_TEMP/kube-linter.download"
+    curl -fsSL --retry 3 -o "$pkg" "https://github.com/stackrox/kube-linter/releases/download/v${VERSION}/kube-linter-linux.tar.gz"
+    echo "${SHA256}  $pkg" | sha256sum -c -
+    tar -xzf "$pkg" -C "$bin" kube-linter
+    echo "$bin" >> "$GITHUB_PATH"

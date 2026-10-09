@@ -1,0 +1,14 @@
+# nuclei 3.11.1, pinned by SHA-256 (verified against the release's published
+# checksums when it ships one). Bump VERSION and SHA256 together.
+- name: Install nuclei
+  env:
+    VERSION: "3.11.1"
+    SHA256: "ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6"
+  run: |
+    set -euo pipefail
+    bin="$RUNNER_TEMP/bin"; mkdir -p "$bin"
+    pkg="$RUNNER_TEMP/nuclei.download"
+    curl -fsSL --retry 3 -o "$pkg" "https://github.com/projectdiscovery/nuclei/releases/download/v${VERSION}/nuclei_${VERSION}_linux_amd64.zip"
+    echo "${SHA256}  $pkg" | sha256sum -c -
+    unzip -o -q "$pkg" nuclei -d "$bin"
+    echo "$bin" >> "$GITHUB_PATH"

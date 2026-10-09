@@ -1,0 +1,13 @@
+[project]
+name = "sample"
+version = "0.1.0"
+description = "Self-test target for the Python workflow (uv.lock path)."
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.16"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"

@@ -1,0 +1,9 @@
+# Installs the Python CLI named by TOOL_SPEC (e.g. "semgrep==1.178.0") into its own
+# virtualenv, so it never shares site-packages with the project under test.
+- name: Install ${{ env.TOOL_NAME }}
+  run: |
+    set -euo pipefail
+    venv="$RUNNER_TEMP/tools-$TOOL_NAME"
+    python3 -m venv "$venv"
+    "$venv/bin/pip" install --quiet --disable-pip-version-check "$TOOL_SPEC"
+    echo "$venv/bin" >> "$GITHUB_PATH"

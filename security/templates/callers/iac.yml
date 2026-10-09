@@ -1,0 +1,34 @@
+# Copy to .github/workflows/security.yml in the repo that uses it. Replace <SHA> with the
+# commit of the github-actions release you are adopting (pin the SHA, not a
+# tag or branch), and keep the version comment beside it.
+#
+# Then make "iac / Summary" a required status check on main. It fails if any job
+# fails, or if a scanner silently produced no report.
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  iac:
+    uses: <org>/github-actions/.github/workflows/security-iac.yml@<SHA> # v1.0.0
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+      pull-requests: write # required: the Summary job posts a sticky PR comment
+    with:
+      # Kustomize repos: lint what is actually deployed, not the raw overlays.
+      # manifests-command: for o in apps/dev apps/prod; do kustomize build "$o"; echo ---; done
+      # Plain manifests: point at the directory instead.
+      # manifests-path: k8s
+      conftest-policy: policy
+      enforce-security: false

@@ -1,0 +1,14 @@
+# tflint 0.64.0, pinned by SHA-256 (verified against the release's published
+# checksums when it ships one). Bump VERSION and SHA256 together.
+- name: Install tflint
+  env:
+    VERSION: "0.64.0"
+    SHA256: "cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537"
+  run: |
+    set -euo pipefail
+    bin="$RUNNER_TEMP/bin"; mkdir -p "$bin"
+    pkg="$RUNNER_TEMP/tflint.download"
+    curl -fsSL --retry 3 -o "$pkg" "https://github.com/terraform-linters/tflint/releases/download/v${VERSION}/tflint_linux_amd64.zip"
+    echo "${SHA256}  $pkg" | sha256sum -c -
+    unzip -o -q "$pkg" tflint -d "$bin"
+    echo "$bin" >> "$GITHUB_PATH"

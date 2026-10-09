@@ -1,0 +1,308 @@
+# Go: lint, test, and security scanning in one reusable workflow.
+#
+#   jobs:
+#     go:
+#       uses: <org>/github-actions/.github/workflows/security-go.yml@<sha> # v1
+#       permissions: { contents: read, security-events: write, actions: read }
+#
+# Mark "<caller job> / Summary" as the required check. See README.md.
+name: Go
+
+on:
+  workflow_call:
+    inputs:
+      # @include inputs-common.yml
+      artifact-prefix:
+        description: Prefix for artifact names. Set it when one run calls this workflow more than once.
+        type: string
+        default: go
+      go-version-file:
+        description: File to read the Go version from, relative to working-directory.
+        type: string
+        default: go.mod
+      go-modules:
+        description: Space-separated module directories, relative to working-directory (e.g. ". key/aws").
+        type: string
+        default: "."
+      go-drop-local-replaces:
+        description: >-
+          Drop replace directives that point at local directories (e.g. a
+          `=> ../sdk` sibling checkout used for development) and build against the
+          required versions instead. CI has no sibling checkouts.
+        type: boolean
+        default: false
+      go-private:
+        description: GOPRIVATE pattern for private modules (e.g. "github.com/your-org/*"). Needs the GO_PRIVATE_TOKEN secret.
+        type: string
+        default: ""
+      golangci-lint-version:
+        description: golangci-lint version. The repo's .golangci.yml is used when present.
+        type: string
+        default: v2.13.2
+      govulncheck-version:
+        description: golang.org/x/vuln version for govulncheck.
+        type: string
+        default: v1.8.0
+      gosec-version:
+        description: securego/gosec version for the gosec SAST job.
+        type: string
+        default: v2.29.0
+      test-flags:
+        description: Flags for go test.
+        type: string
+        default: -race
+      test-packages:
+        description: Packages for go test, per module.
+        type: string
+        default: ./...
+      codeql-build-mode:
+        description: CodeQL build mode for Go (autobuild or manual).
+        type: string
+        default: autobuild
+      semgrep-rules:
+        description: Space-separated Semgrep registry rulesets.
+        type: string
+        default: p/golang p/gosec p/secrets
+    secrets:
+      GO_PRIVATE_TOKEN:
+        description: Token with read access to the modules matched by go-private.
+        required: false
+      SONAR_TOKEN:
+        required: false
+
+permissions: {}
+
+jobs:
+  lint:
+    name: Lint (gofmt, go vet, golangci-lint)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the code
+    steps:
+      # @include checkout.yml
+      # @include setup-go.yml
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ inputs.golangci-lint-version }}
+          install-only: true
+      - name: Lint
+        env:
+          WD: ${{ inputs.working-directory }}
+          MODULES: ${{ inputs.go-modules }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          status=0
+          cd "$WD"
+          for mod in $MODULES; do
+            name=$(printf '%s' "$mod" | tr -c 'A-Za-z0-9' '_')
+            echo "::group::$mod"
+            unformatted=$(cd "$mod" && gofmt -l .)
+            if [ -n "$unformatted" ]; then
+              echo "::error::gofmt: these files in $mod need formatting:"
+              echo "$unformatted"
+              status=1
+            fi
+            (cd "$mod" && go vet ./...) || status=1
+            (cd "$mod" && golangci-lint run --output.text.path=stdout \
+              --output.checkstyle.path="$out/golangci-$name.xml" ./...) || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+      # @include upload-reports.yml
+
+  test:
+    name: Test
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the code
+    steps:
+      # @include checkout.yml
+      # @include setup-go.yml
+      - name: go test
+        env:
+          WD: ${{ inputs.working-directory }}
+          MODULES: ${{ inputs.go-modules }}
+          FLAGS: ${{ inputs.test-flags }}
+          PACKAGES: ${{ inputs.test-packages }}
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          cd "$WD"
+          echo "### Go test" >> "$GITHUB_STEP_SUMMARY"
+          # GitHub starts `run:` steps with `bash -e`, and `set -uo pipefail`
+          # does not clear that inherited `-e`. Turn it off explicitly here, so
+          # a failing `go test` pipeline does not abort the step before its
+          # output is captured and summarised (setup above stays fatal). The
+          # real test exit is tracked in rc and returned at the end, so the
+          # gate still fails on a genuine test failure — only reporting is
+          # made non-fatal.
+          set +e
+          rc=0
+          for mod in $MODULES; do
+            name=$(printf '%s' "$mod" | tr -c 'A-Za-z0-9' '_')
+            log="$out/test-$name.log"
+            # shellcheck disable=SC2086 # FLAGS and PACKAGES are word lists
+            (cd "$mod" && go test $FLAGS -covermode=atomic -coverprofile="$out/coverage-$name.out" $PACKAGES) 2>&1 | tee "$log"
+            mrc=${PIPESTATUS[0]}
+            if [ "$mrc" -eq 0 ]; then
+              total=$(cd "$mod" && go tool cover -func="$out/coverage-$name.out" 2>/dev/null | awk '/^total:/ {print $NF}')
+              echo "- \`$mod\`: pass · coverage ${total:-n/a}" >> "$GITHUB_STEP_SUMMARY"
+            else
+              rc=1
+              {
+                echo "- \`$mod\`: **FAIL**"
+                echo ""
+                echo '```'
+                # The failing test names and the assertion/panic lines — the
+                # "what went wrong" that was previously only in the raw log.
+                grep -E '^[[:space:]]*(--- FAIL:|=== (FAIL|NAME)|[[:alnum:]_./-]+\.go:[0-9]+:|panic:|goroutine )|^FAIL([[:space:]]|$)' "$log" | head -60
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY" || true
+            fi
+          done
+          exit "$rc"
+      # @include upload-reports.yml
+
+  deps:
+    name: Dependency vulnerabilities (govulncheck)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      # @include setup-go.yml
+      - name: Scan
+        id: scan
+        env:
+          WD: ${{ inputs.working-directory }}
+          MODULES: ${{ inputs.go-modules }}
+          VERSION: ${{ inputs.govulncheck-version }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out" "$RUNNER_TEMP/govulncheck"
+          # Fetched through the Go module proxy and verified against the checksum database.
+          # GOTOOLCHAIN=auto: recent govulncheck releases need a newer Go to build than the
+          # module under test may pin; Go fetches that toolchain (checksum-verified) for the
+          # install only. The analysis still runs with the module's own Go.
+          GOTOOLCHAIN=auto GOBIN="$RUNNER_TEMP/bin" go install "golang.org/x/vuln/cmd/govulncheck@$VERSION"
+          cd "$WD"
+          for mod in $MODULES; do
+            name=$(printf '%s' "$mod" | tr -c 'A-Za-z0-9' '_')
+            # SARIF mode exits 0 when it finds vulnerabilities and non-zero only on errors.
+            (cd "$mod" && "$RUNNER_TEMP/bin/govulncheck" -format sarif ./...) > "$RUNNER_TEMP/govulncheck/$name.sarif"
+          done
+          # One run per upload: code scanning rejects several runs of one tool in a file.
+          jq -s 'reduce .[] as $d (null;
+                   if . == null then $d
+                   else .runs[0].results += ($d.runs[0].results // [])
+                      | .runs[0].tool.driver.rules = ((.runs[0].tool.driver.rules // []) + ($d.runs[0].tool.driver.rules // []) | unique_by(.id))
+                   end)' "$RUNNER_TEMP"/govulncheck/*.sarif > "$out/govulncheck.sarif"
+          # levels=error: count only calls into vulnerable functions. "warning" and
+          # "note" mean the vulnerable package or module is present but not reached.
+          {
+            echo "sarif=$out/govulncheck.sarif"
+            echo "tool=govulncheck"
+            echo "levels=error"
+          } >> "$GITHUB_OUTPUT"
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  gosec:
+    name: SAST (gosec)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      # @include setup-go.yml
+      - name: Scan
+        id: scan
+        env:
+          WD: ${{ inputs.working-directory }}
+          MODULES: ${{ inputs.go-modules }}
+          VERSION: ${{ inputs.gosec-version }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out" "$RUNNER_TEMP/gosec"
+          # gosec covers the Go rules golangci-lint would only run if the repo
+          # enables them (G101 creds, G107 SSRF, G204 subprocess, G401/G402
+          # crypto/TLS, ...). Installed through the module proxy, checksum-verified.
+          GOTOOLCHAIN=auto GOBIN="$RUNNER_TEMP/bin" go install "github.com/securego/gosec/v2/cmd/gosec@$VERSION"
+          cd "$WD"
+          for mod in $MODULES; do
+            name=$(printf '%s' "$mod" | tr -c 'A-Za-z0-9' '_')
+            # -no-fail: exit 0 even with findings; report-sarif.yml decides enforcement.
+            (cd "$mod" && "$RUNNER_TEMP/bin/gosec" -quiet -no-fail -fmt sarif -out "$RUNNER_TEMP/gosec/$name.sarif" ./...)
+          done
+          # One run per upload: code scanning rejects several runs of one tool in a file.
+          jq -s 'reduce .[] as $d (null;
+                   if . == null then $d
+                   else .runs[0].results += ($d.runs[0].results // [])
+                      | .runs[0].tool.driver.rules = ((.runs[0].tool.driver.rules // []) + ($d.runs[0].tool.driver.rules // []) | unique_by(.id))
+                   end)' "$RUNNER_TEMP"/gosec/*.sarif > "$out/gosec.sarif"
+          {
+            echo "sarif=$out/gosec.sarif"
+            echo "tool=gosec"
+          } >> "$GITHUB_OUTPUT"
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  codeql:
+    name: SAST (CodeQL)
+    if: inputs.codeql
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 45
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      # @include setup-go.yml
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: go
+          build-mode: ${{ inputs.codeql-build-mode }}
+          source-root: ${{ inputs.working-directory }}
+          queries: ${{ inputs.codeql-queries }}
+      - name: Analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: ${{ inputs.artifact-prefix }}/codeql
+          upload: never
+          output: ${{ runner.temp }}/codeql
+      # @include codeql-collect.yml
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  # @include jobs-shared-security.yml
+  # @include jobs-shared-supply-chain.yml
+  # @include job-sonar.yml
+
+  summary:
+    name: Summary
+    if: always()
+    needs: [lint, test, deps, gosec, codeql, semgrep, secrets, trivy, workflow-audit, dependency-review, sbom, sonar]
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the code
+      pull-requests: write # post the sticky PR comment; capped by the caller's grant, so a caller that omits it just gets a 403-warn, not a failure
+    env:
+      REQUIRED_REPORTS: deps gosec codeql semgrep secrets trivy workflow-audit
+    steps:
+      # @include summary-steps.yml
