@@ -1,0 +1,39 @@
+working-directory:
+  description: Project directory, relative to the repository root.
+  type: string
+  default: "."
+runs-on:
+  description: Runner label. Must be Linux x64 (tools are downloaded as linux-amd64 binaries).
+  type: string
+  default: ubuntu-24.04
+enforce-security:
+  description: >-
+    When false (the default), security findings are reported but do not fail the
+    build. Land warn-only, triage the baseline, then flip to true. Lint, tests and
+    tool errors always fail regardless.
+  type: boolean
+  default: false
+upload-sarif:
+  description: Upload SARIF results to GitHub code scanning (private repos need Advanced Security).
+  type: boolean
+  default: true
+semgrep:
+  description: Run Semgrep. Custom rules in <working-directory>/.semgrep/ are picked up automatically.
+  type: boolean
+  default: true
+gitleaks:
+  description: Run gitleaks over the full commit history.
+  type: boolean
+  default: true
+trivy:
+  description: Run trivy fs (dependency vulnerabilities, IaC and Dockerfile misconfiguration, secrets).
+  type: boolean
+  default: true
+trivy-severity:
+  description: Comma-separated Trivy severities to report.
+  type: string
+  default: HIGH,CRITICAL
+workflow-audit:
+  description: Run zizmor over the repo's GitHub Actions workflows.
+  type: boolean
+  default: true

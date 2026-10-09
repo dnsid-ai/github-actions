@@ -1,0 +1,14 @@
+# conftest 0.70.1, pinned by SHA-256 (verified against the release's published
+# checksums when it ships one). Bump VERSION and SHA256 together.
+- name: Install conftest
+  env:
+    VERSION: "0.70.1"
+    SHA256: "613d124b8f6c1f3cee890491f7ab19114cca5a2102ca47cb2e6c35b4c23f9c8a"
+  run: |
+    set -euo pipefail
+    bin="$RUNNER_TEMP/bin"; mkdir -p "$bin"
+    pkg="$RUNNER_TEMP/conftest.download"
+    curl -fsSL --retry 3 -o "$pkg" "https://github.com/open-policy-agent/conftest/releases/download/v${VERSION}/conftest_${VERSION}_Linux_x86_64.tar.gz"
+    echo "${SHA256}  $pkg" | sha256sum -c -
+    tar -xzf "$pkg" -C "$bin" conftest
+    echo "$bin" >> "$GITHUB_PATH"

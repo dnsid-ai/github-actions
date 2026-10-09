@@ -1,0 +1,145 @@
+# Builds a container image locally (nothing is pushed) and scans it before it
+# reaches a registry: OS-package and language vulnerabilities, and secrets baked
+# into layers. Also writes an SBOM of the image. Scanning before the push
+# catches problems before the image reaches any registry.
+#
+#   jobs:
+#     image:
+#       uses: <org>/github-actions/.github/workflows/security-container.yml@<sha> # v1
+#       permissions: { contents: read, security-events: write, actions: read }
+#       with:
+#         dockerfile: Dockerfile
+#
+# Mark "<caller job> / Summary" as the required check. See README.md.
+name: Container
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label. Must be Linux x64.
+        type: string
+        default: ubuntu-24.04
+      artifact-prefix:
+        description: Prefix for artifact names. Set it when one run calls this workflow more than once (e.g. one call per image).
+        type: string
+        default: container
+      enforce-security:
+        description: When false (the default), findings are reported but do not fail the build.
+        type: boolean
+        default: false
+      upload-sarif:
+        description: Upload SARIF results to GitHub code scanning.
+        type: boolean
+        default: true
+      context:
+        description: Docker build context, relative to the repository root.
+        type: string
+        default: "."
+      dockerfile:
+        description: Dockerfile path, relative to the repository root.
+        type: string
+        default: Dockerfile
+      target:
+        description: Build stage to scan (--target). Empty builds the final stage.
+        type: string
+        default: ""
+      build-args:
+        description: Newline-separated KEY=VALUE build arguments. Not for secrets.
+        type: string
+        default: ""
+      trivy-severity:
+        description: Comma-separated Trivy severities to report.
+        type: string
+        default: HIGH,CRITICAL
+      ignore-unfixed:
+        description: Skip vulnerabilities that have no fixed version yet.
+        type: boolean
+        default: false
+      sbom:
+        description: Write an SPDX SBOM of the built image into the reports artifact.
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  image:
+    name: Image scan (Trivy)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 45
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      # @include install-trivy.yml
+      - name: Build image (local only, not pushed)
+        id: build
+        env:
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          TARGET: ${{ inputs.target }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+        run: |
+          set -euo pipefail
+          image="scan.local/${GITHUB_REPOSITORY,,}:${GITHUB_SHA::12}"
+          args=(build --file "$DOCKERFILE" --tag "$image")
+          if [ -n "$TARGET" ]; then args+=(--target "$TARGET"); fi
+          while IFS= read -r arg; do
+            if [ -n "$arg" ]; then args+=(--build-arg "$arg"); fi
+          done <<< "$BUILD_ARGS"
+          docker "${args[@]}" "$CONTEXT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Scan
+        id: scan
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          SEVERITY: ${{ inputs.trivy-severity }}
+          IGNORE_UNFIXED: ${{ inputs.ignore-unfixed }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          # shellcheck disable=SC2054 # the commas are Trivy's list syntax
+          args=(image --scanners vuln,secret --severity "$SEVERITY" --exit-code 0 --no-progress)
+          if [ "$IGNORE_UNFIXED" = true ]; then args+=(--ignore-unfixed); fi
+          if [ -f .trivyignore.yaml ]; then args+=(--ignorefile .trivyignore.yaml); fi
+          trivy "${args[@]}" --format json --output "$out/trivy-image.json" "$IMAGE"
+          trivy convert --format sarif --output "$out/trivy-image.sarif" "$out/trivy-image.json"
+          {
+            echo "### Image"
+            echo
+            trivy convert --format table "$out/trivy-image.json" | sed 's/^/    /'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "sarif=$out/trivy-image.sarif"
+            echo "tool=Trivy (image)"
+          } >> "$GITHUB_OUTPUT"
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      - name: Generate SPDX SBOM of the image
+        if: inputs.sbom
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/reports/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      # @include upload-reports.yml
+
+  summary:
+    name: Summary
+    if: always()
+    needs: [image]
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the code
+      pull-requests: write # post the sticky PR comment; capped by the caller's grant, so a caller that omits it just gets a 403-warn, not a failure
+    env:
+      REQUIRED_REPORTS: image
+    steps:
+      # @include summary-steps.yml

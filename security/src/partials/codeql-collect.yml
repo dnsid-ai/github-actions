@@ -1,0 +1,18 @@
+# CodeQL runs with upload: never so that a repo using CodeQL "default setup"
+# (which rejects advanced-setup uploads) warns instead of failing. This step
+# exposes its SARIF to the shared report and upload steps.
+- name: Collect CodeQL results
+  id: scan
+  run: |
+    set -euo pipefail
+    out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+    src=$(find "$RUNNER_TEMP/codeql" -name '*.sarif' | head -n 1)
+    if [ -z "$src" ]; then
+      echo "::error::CodeQL produced no SARIF"
+      exit 1
+    fi
+    cp "$src" "$out/codeql.sarif"
+    {
+      echo "sarif=$out/codeql.sarif"
+      echo "tool=CodeQL"
+    } >> "$GITHUB_OUTPUT"

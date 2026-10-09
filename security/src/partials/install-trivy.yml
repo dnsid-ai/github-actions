@@ -1,0 +1,14 @@
+# trivy 0.74.0, pinned by SHA-256 (verified against the release's published
+# checksums when it ships one). Bump VERSION and SHA256 together.
+- name: Install trivy
+  env:
+    VERSION: "0.74.0"
+    SHA256: "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a"
+  run: |
+    set -euo pipefail
+    bin="$RUNNER_TEMP/bin"; mkdir -p "$bin"
+    pkg="$RUNNER_TEMP/trivy.download"
+    curl -fsSL --retry 3 -o "$pkg" "https://github.com/aquasecurity/trivy/releases/download/v${VERSION}/trivy_${VERSION}_Linux-64bit.tar.gz"
+    echo "${SHA256}  $pkg" | sha256sum -c -
+    tar -xzf "$pkg" -C "$bin" trivy
+    echo "$bin" >> "$GITHUB_PATH"

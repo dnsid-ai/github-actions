@@ -1,0 +1,36 @@
+# Copy to .github/workflows/ci.yml in the repo that uses it. Replace <SHA> with the
+# commit of the github-actions release you are adopting (pin the SHA, not a
+# tag or branch), and keep the version comment beside it.
+#
+# Then make "go / Summary" a required status check on main. It fails if any job
+# fails, or if a scanner silently produced no report.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go:
+    uses: <org>/github-actions/.github/workflows/security-go.yml@<SHA> # v1.0.0
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+      pull-requests: write # required: the Summary job posts a sticky PR comment
+    with:
+      # go-modules: ". key/aws"                      # one entry per go.mod
+      # go-private: github.com/your-org/*          # plus GO_PRIVATE_TOKEN below
+      # test-flags: -race -tags integration
+      # codeql: false                                # if the repo uses CodeQL default setup
+      enforce-security: false                        # flip to true once the baseline is triaged
+    secrets:
+      # GO_PRIVATE_TOKEN: ${{ secrets.GO_PRIVATE_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

@@ -1,0 +1,14 @@
+# shellcheck 0.11.0, pinned by SHA-256 (verified against the release's published
+# checksums when it ships one). Bump VERSION and SHA256 together.
+- name: Install shellcheck
+  env:
+    VERSION: "0.11.0"
+    SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+  run: |
+    set -euo pipefail
+    bin="$RUNNER_TEMP/bin"; mkdir -p "$bin"
+    pkg="$RUNNER_TEMP/shellcheck.download"
+    curl -fsSL --retry 3 -o "$pkg" "https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/shellcheck-v${VERSION}.linux.x86_64.tar.xz"
+    echo "${SHA256}  $pkg" | sha256sum -c -
+    tar -xJf "$pkg" -C "$RUNNER_TEMP" && install -m 0755 "$RUNNER_TEMP/shellcheck-v${VERSION}/shellcheck" "$bin/shellcheck"
+    echo "$bin" >> "$GITHUB_PATH"

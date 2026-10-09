@@ -1,0 +1,169 @@
+# Jobs every workflow shares. Each job id is fixed, because the summary job and
+# the reports artifacts (<artifact-prefix>.reports.<job id>) key on it.
+
+semgrep:
+  name: SAST (Semgrep)
+  if: inputs.semgrep
+  runs-on: ${{ inputs.runs-on }}
+  timeout-minutes: 20
+  permissions:
+    contents: read # check out the code
+    security-events: write # upload SARIF to code scanning
+    actions: read # code scanning reads run metadata on private repos
+  env:
+    TOOL_NAME: semgrep
+    TOOL_SPEC: semgrep==1.178.0
+  steps:
+    # @include checkout.yml
+    # @include python-tool.yml
+    - name: Scan
+      id: scan
+      env:
+        WD: ${{ inputs.working-directory }}
+        RULES: ${{ inputs.semgrep-rules }}
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+        args=()
+        for rule in $RULES; do args+=(--config "$rule"); done
+        # Repo-specific rules live in <working-directory>/.semgrep/. When they ship
+        # tests (tests/semgrep/), the tests must pass: a broken custom rule is a
+        # gate that is green over nothing, so this part always blocks.
+        if [ -d "$WD/.semgrep" ]; then
+          args+=(--config "$WD/.semgrep")
+          if [ -d "$WD/tests/semgrep" ]; then
+            semgrep --test --metrics=off --disable-version-check --config "$WD/.semgrep" "$WD/tests/semgrep"
+          fi
+        fi
+        semgrep scan --metrics=off --disable-version-check "${args[@]}" \
+          --sarif-output="$out/semgrep.sarif" --json-output="$RUNNER_TEMP/semgrep.json" "$WD"
+        # A scan of zero files passes with zero findings: a gate that is green over
+        # nothing. The usual cause is Semgrep's default ignore list, which skips tests/,
+        # test/ and similar directories; a .semgrepignore at the repo root replaces it.
+        scanned=$(jq '.paths.scanned | length' "$RUNNER_TEMP/semgrep.json")
+        echo "Semgrep scanned $scanned file(s)" >> "$GITHUB_STEP_SUMMARY"
+        if [ "$scanned" -eq 0 ]; then
+          echo "::error::Semgrep scanned 0 files under $WD. Check .semgrepignore: Semgrep's default ignore list skips tests/ directories."
+          exit 1
+        fi
+        {
+          echo "sarif=$out/semgrep.sarif"
+          echo "tool=Semgrep"
+        } >> "$GITHUB_OUTPUT"
+    # @include report-sarif.yml
+    # @include upload-sarif.yml
+    # @include upload-reports.yml
+
+secrets:
+  name: Secrets (gitleaks)
+  if: inputs.gitleaks
+  runs-on: ${{ inputs.runs-on }}
+  timeout-minutes: 15
+  permissions:
+    contents: read # check out the code
+    security-events: write # upload SARIF to code scanning
+    actions: read # code scanning reads run metadata on private repos
+  steps:
+    # @include checkout-history.yml
+    # @include install-gitleaks.yml
+    - name: Scan commit history
+      id: scan
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+        # Every commit reachable from HEAD, so a key that was committed and later
+        # deleted is still caught. Deliberately not --all: that would scan every
+        # branch in the repo, and one bad branch would fail every PR.
+        # Reads .gitleaks.toml and .gitleaksignore from the repo root when present.
+        gitleaks git . --redact --no-banner --exit-code 0 \
+          --report-format sarif --report-path "$out/gitleaks.sarif"
+        {
+          echo "sarif=$out/gitleaks.sarif"
+          echo "tool=gitleaks"
+        } >> "$GITHUB_OUTPUT"
+    # @include report-sarif.yml
+    # @include upload-sarif.yml
+    # @include upload-reports.yml
+
+trivy:
+  name: Vulnerabilities, misconfig and secrets (Trivy)
+  if: inputs.trivy
+  runs-on: ${{ inputs.runs-on }}
+  timeout-minutes: 20
+  permissions:
+    contents: read # check out the code
+    security-events: write # upload SARIF to code scanning
+    actions: read # code scanning reads run metadata on private repos
+  steps:
+    # @include checkout.yml
+    # @include install-trivy.yml
+    - name: Scan
+      id: scan
+      env:
+        WD: ${{ inputs.working-directory }}
+        SEVERITY: ${{ inputs.trivy-severity }}
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+        # shellcheck disable=SC2054 # the commas are Trivy's list syntax
+        args=(fs --scanners vuln,secret,misconfig --severity "$SEVERITY" --exit-code 0 --no-progress)
+        for f in "$WD/.trivyignore.yaml" .trivyignore.yaml "$WD/.trivyignore" .trivyignore; do
+          if [ -f "$f" ]; then args+=(--ignorefile "$f"); break; fi
+        done
+        trivy "${args[@]}" --format json --output "$out/trivy.json" "$WD"
+        trivy convert --format sarif --output "$out/trivy.sarif" "$out/trivy.json"
+        {
+          echo "sarif=$out/trivy.sarif"
+          echo "tool=Trivy"
+          echo "base=$WD"
+        } >> "$GITHUB_OUTPUT"
+    # @include report-sarif.yml
+    # @include upload-sarif.yml
+    # @include upload-reports.yml
+
+workflow-audit:
+  name: Workflow security (zizmor)
+  if: inputs.workflow-audit
+  runs-on: ${{ inputs.runs-on }}
+  timeout-minutes: 10
+  permissions:
+    contents: read # check out the code
+    security-events: write # upload SARIF to code scanning
+    actions: read # code scanning reads run metadata on private repos
+  env:
+    TOOL_NAME: zizmor
+    TOOL_SPEC: zizmor==1.30.1
+  steps:
+    # @include checkout.yml
+    # @include python-tool.yml
+    - name: Audit GitHub Actions workflows
+      id: scan
+      env:
+        # Read-only use: lets zizmor resolve action refs (impostor commits,
+        # known-vulnerable actions). Nothing is written with it.
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+        # Online audits (impostor commits, known-vulnerable actions) query the
+        # GitHub API about every `uses:` target. The run's token cannot read
+        # another private repo, such as a private shared-workflows repo, so
+        # zizmor aborts; rerun offline then, and say so, rather than fail.
+        rc=0
+        zizmor --format sarif --no-exit-codes . > "$out/zizmor.sarif" 2> "$RUNNER_TEMP/zizmor.err" || rc=$?
+        cat "$RUNNER_TEMP/zizmor.err" >&2
+        if [ "$rc" -ne 0 ]; then
+          if ! grep -qE "no access|couldn't list|rate limit" "$RUNNER_TEMP/zizmor.err"; then
+            exit "$rc"
+          fi
+          echo "::notice::zizmor online audits could not reach a referenced repo with this run's token; ran offline audits only."
+          echo "> zizmor ran offline audits only: a referenced repo was not readable with this run's token." >> "$GITHUB_STEP_SUMMARY"
+          zizmor --format sarif --no-exit-codes --offline . > "$out/zizmor.sarif"
+        fi
+        {
+          echo "sarif=$out/zizmor.sarif"
+          echo "tool=zizmor"
+        } >> "$GITHUB_OUTPUT"
+    # @include report-sarif.yml
+    # @include upload-sarif.yml
+    # @include upload-reports.yml

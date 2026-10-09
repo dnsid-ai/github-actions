@@ -1,0 +1,68 @@
+# Installs the project into <working-directory>/.venv and puts it on PATH.
+# With a uv.lock this is `uv sync --locked`: CI gets exactly the locked versions
+# and fails if the lock is stale. Without one it falls back to pip, which
+# resolves fresh every run, and says so.
+- name: Set up Python
+  uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+  with:
+    python-version: ${{ inputs.python-version }}
+- name: Set up uv
+  if: hashFiles(format('{0}/uv.lock', inputs.working-directory)) != ''
+  uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+  with:
+    version: ${{ inputs.uv-version }}
+    enable-cache: false
+- name: Install project
+  id: env
+  env:
+    WD: ${{ inputs.working-directory }}
+    INSTALL: ${{ inputs.install-command }}
+  run: |
+    set -euo pipefail
+    cd "$WD"
+    if [ -n "$INSTALL" ]; then
+      mode=custom
+      bash -euo pipefail -c "$INSTALL"
+    elif [ -f uv.lock ]; then
+      mode=uv
+      uv sync --locked --all-extras --all-groups
+    else
+      mode=pip
+      echo "::warning::No uv.lock in $WD: dependencies are resolved fresh on every run, so CI is not reproducible."
+      python -m venv .venv
+      .venv/bin/python -m pip install --quiet --disable-pip-version-check --upgrade pip
+      if [ -f pyproject.toml ] || [ -f setup.py ]; then
+        .venv/bin/python -m pip install --quiet -e ".[dev]"
+      fi
+      if [ -f requirements.txt ]; then .venv/bin/python -m pip install --quiet -r requirements.txt; fi
+      if [ -f requirements-dev.txt ]; then .venv/bin/python -m pip install --quiet -r requirements-dev.txt; fi
+    fi
+    if [ ! -x .venv/bin/python ]; then
+      echo "::error::install-command must create $WD/.venv"
+      exit 1
+    fi
+    echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+    echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+    echo "mode=$mode" >> "$GITHUB_OUTPUT"
+- name: Install tool into the project environment
+  # $TOOLS (set by the job) are CLIs the job needs inside the project venv,
+  # skipped when the project already provides them.
+  if: env.TOOLS != ''
+  env:
+    WD: ${{ inputs.working-directory }}
+    MODE: ${{ steps.env.outputs.mode }}
+  run: |
+    set -euo pipefail
+    cd "$WD"
+    missing=()
+    for spec in $TOOLS; do
+      exe=${spec%%[=<>]*}
+      if [ ! -x ".venv/bin/$exe" ]; then missing+=("$spec"); fi
+    done
+    if [ "${#missing[@]}" -eq 0 ]; then exit 0; fi
+    echo "Installing ${missing[*]} (not provided by the project)"
+    if [ "$MODE" = uv ]; then
+      uv pip install --quiet "${missing[@]}"
+    else
+      .venv/bin/python -m pip install --quiet --disable-pip-version-check "${missing[@]}"
+    fi

@@ -1,0 +1,268 @@
+# Python: lint, test, and security scanning in one reusable workflow.
+#
+#   jobs:
+#     python:
+#       uses: <org>/github-actions/.github/workflows/security-python.yml@<sha> # v1
+#       permissions: { contents: read, security-events: write, actions: read }
+#
+# Mark "<caller job> / Summary" as the required check. See README.md.
+name: Python
+
+on:
+  workflow_call:
+    inputs:
+      # @include inputs-common.yml
+      artifact-prefix:
+        description: Prefix for artifact names. Set it when one run calls this workflow more than once.
+        type: string
+        default: python
+      python-version:
+        description: Python version for setup-python.
+        type: string
+        default: "3.12"
+      uv-version:
+        description: uv version, used when the project has a uv.lock.
+        type: string
+        default: 0.12.18
+      install-command:
+        description: >-
+          Override the install step. Must leave the project installed in
+          <working-directory>/.venv. Default: `uv sync --locked` with a uv.lock,
+          otherwise `pip install -e ".[dev]"`.
+        type: string
+        default: ""
+      ruff-version:
+        description: ruff version, used only when the project does not install ruff itself.
+        type: string
+        default: 0.16.9
+      format-check:
+        description: Fail when `ruff format --check` finds unformatted files.
+        type: boolean
+        default: true
+      mypy-target:
+        description: Package or path to type-check with mypy (mypy must be a dev dependency). Empty skips mypy.
+        type: string
+        default: ""
+      pytest-args:
+        description: Arguments for pytest (run under coverage).
+        type: string
+        default: ""
+      pip-audit-version:
+        description: pip-audit version.
+        type: string
+        default: 2.10.1
+      semgrep-rules:
+        description: Space-separated Semgrep registry rulesets.
+        type: string
+        default: p/python p/secrets
+    secrets:
+      SONAR_TOKEN:
+        required: false
+
+permissions: {}
+
+jobs:
+  lint:
+    name: Lint (ruff, mypy) and security lint (ruff S)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    env:
+      TOOLS: ruff==${{ inputs.ruff-version }}
+    steps:
+      # @include checkout.yml
+      # @include setup-python-project.yml
+      - name: Lint
+        env:
+          WD: ${{ inputs.working-directory }}
+          FORMAT_CHECK: ${{ inputs.format-check }}
+          MYPY_TARGET: ${{ inputs.mypy-target }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          cd "$WD"
+          status=0
+          ruff check --output-format=github . || status=1
+          # Same findings as JSON for SonarQube.
+          ruff check --output-format=json --exit-zero . > "$out/ruff.json"
+          if [ "$FORMAT_CHECK" = true ]; then ruff format --check . || status=1; fi
+          if [ -n "$MYPY_TARGET" ]; then
+            # shellcheck disable=SC2086 # MYPY_TARGET may list several paths
+            mypy $MYPY_TARGET || status=1
+          fi
+          exit "$status"
+      # The flake8-bandit rules (ruff "S"), whatever the project's own ruff
+      # config selects. Reported like every other security scanner.
+      - name: Security lint
+        id: scan
+        if: always()
+        env:
+          WD: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          (cd "$WD" && ruff check --select S --output-format=sarif --exit-zero .) > "$out/ruff-security.sarif"
+          {
+            echo "sarif=$out/ruff-security.sarif"
+            echo "tool=ruff (S: bandit rules)"
+          } >> "$GITHUB_OUTPUT"
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  test:
+    name: Test (pytest)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the code
+    env:
+      TOOLS: coverage==7.16.2 pytest
+    steps:
+      # @include checkout.yml
+      # @include setup-python-project.yml
+      - name: pytest under coverage
+        env:
+          WD: ${{ inputs.working-directory }}
+          PYTEST_ARGS: ${{ inputs.pytest-args }}
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          cd "$WD"
+          echo "### Python test (pytest)" >> "$GITHUB_STEP_SUMMARY"
+          # GitHub starts `run:` steps with `bash -e`, and `set -uo pipefail`
+          # does not clear that inherited `-e`. Turn it off so a failing pytest
+          # run does not abort before its output is captured and summarised
+          # (setup above stays fatal). The real pytest exit is returned at the
+          # end, so the gate still fails — only reporting is made non-fatal.
+          set +e
+          log="$out/pytest.log"
+          # shellcheck disable=SC2086 # PYTEST_ARGS is a word list
+          coverage run -m pytest $PYTEST_ARGS 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -eq 0 ]; then
+            coverage xml -o "$out/coverage.xml" 2>/dev/null
+            { echo "- pytest: pass"; coverage report --format=markdown 2>/dev/null; } >> "$GITHUB_STEP_SUMMARY" || true
+          else
+            # The failing tests and assertion/error lines — the "what went
+            # wrong" that was previously only in the raw log.
+            { echo "- pytest: **FAIL**"; echo ""; echo '```'
+              grep -E '(^FAILED |^ERROR |^E |AssertionError|short test summary|[0-9]+ failed)' "$log" | head -60
+              echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+          exit "$rc"
+      # @include upload-reports.yml
+
+  deps:
+    name: Dependency vulnerabilities (pip-audit)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      # @include setup-python-project.yml
+      - name: Scan
+        id: scan
+        env:
+          WD: ${{ inputs.working-directory }}
+          MODE: ${{ steps.env.outputs.mode }}
+          VERSION: ${{ inputs.pip-audit-version }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          cd "$WD"
+          req="$RUNNER_TEMP/requirements.txt"
+          if [ "$MODE" = uv ]; then
+            # Audit exactly what the lockfile pins, every extra and group included.
+            uv export --locked --format requirements-txt --no-hashes --no-emit-project \
+              --all-extras --all-groups > "$req"
+            manifest=uv.lock
+          else
+            .venv/bin/python -m pip freeze --exclude-editable > "$req"
+            manifest=$([ -f pyproject.toml ] && echo pyproject.toml || echo requirements.txt)
+          fi
+          # pip-audit runs from its own venv, so it doesn't audit itself.
+          python3 -m venv "$RUNNER_TEMP/pip-audit"
+          "$RUNNER_TEMP/pip-audit/bin/pip" install --quiet --disable-pip-version-check "pip-audit==$VERSION"
+          rc=0
+          "$RUNNER_TEMP/pip-audit/bin/pip-audit" -r "$req" --no-deps --disable-pip --progress-spinner off \
+            --format json --output "$out/pip-audit.json" || rc=$?
+          # Exit 1 also means "vulnerabilities found"; only a missing or invalid report is a tool error.
+          if ! jq -e '.dependencies' "$out/pip-audit.json" > /dev/null 2>&1; then
+            echo "::error::pip-audit failed (exit $rc)"
+            exit 1
+          fi
+          # SARIF so pip-audit is summarized, gated and uploaded like every other scanner.
+          jq --arg manifest "$manifest" '
+            [.dependencies[] as $d | $d.vulns[]? | {dep: $d, v: .}] | unique_by([.dep.name, .v.id]) as $hits
+            | {version: "2.1.0",
+               "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+               runs: [{
+                 tool: {driver: {name: "pip-audit", informationUri: "https://github.com/pypa/pip-audit",
+                   rules: ([$hits[] | {id: .v.id, shortDescription: {text: "\(.v.id) in \(.dep.name)"},
+                                       fullDescription: {text: (.v.description // .v.id)}}] | unique_by(.id))}},
+                 results: [$hits[] | {
+                   ruleId: .v.id, level: "error",
+                   message: {text: "\(.dep.name) \(.dep.version) is affected by \(.v.id). Fixed in: \((.v.fix_versions // []) | if length == 0 then "no fixed release yet" else join(", ") end)."},
+                   locations: [{physicalLocation: {artifactLocation: {uri: $manifest}, region: {startLine: 1}}}]}]
+               }]}' "$out/pip-audit.json" > "$out/pip-audit.sarif"
+          {
+            echo "sarif=$out/pip-audit.sarif"
+            echo "tool=pip-audit"
+          } >> "$GITHUB_OUTPUT"
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  codeql:
+    name: SAST (CodeQL)
+    if: inputs.codeql
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 45
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: python
+          build-mode: none
+          source-root: ${{ inputs.working-directory }}
+          queries: ${{ inputs.codeql-queries }}
+      - name: Analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: ${{ inputs.artifact-prefix }}/codeql
+          upload: never
+          output: ${{ runner.temp }}/codeql
+      # @include codeql-collect.yml
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  # @include jobs-shared-security.yml
+  # @include jobs-shared-supply-chain.yml
+  # @include job-sonar.yml
+
+  summary:
+    name: Summary
+    if: always()
+    needs: [lint, test, deps, codeql, semgrep, secrets, trivy, workflow-audit, dependency-review, sbom, sonar]
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the code
+      pull-requests: write # post the sticky PR comment; capped by the caller's grant, so a caller that omits it just gets a 403-warn, not a failure
+    env:
+      REQUIRED_REPORTS: lint deps codeql semgrep secrets trivy workflow-audit
+    steps:
+      # @include summary-steps.yml

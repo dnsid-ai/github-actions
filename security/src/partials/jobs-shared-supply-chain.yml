@@ -1,0 +1,70 @@
+dependency-review:
+  name: Dependency review
+  if: inputs.dependency-review && github.event_name == 'pull_request'
+  runs-on: ${{ inputs.runs-on }}
+  timeout-minutes: 10
+  permissions:
+    contents: read # read the dependency graph for both refs
+  steps:
+    # Compares the PR's dependency graph with the base branch and flags newly added
+    # vulnerable packages. Needs the dependency graph (on by default for public
+    # repos; needs Advanced Security on private ones).
+    - name: Check the repo has a dependency graph
+      id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BASE: ${{ github.event.pull_request.base.sha }}
+        HEAD: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        # A private repo without Advanced Security answers 404 (or 403). Skip
+        # with a notice then: the repo cannot do dependency review at all.
+        # Any other error is real and fails the job.
+        if gh api "repos/$GITHUB_REPOSITORY/dependency-graph/compare/$BASE...$HEAD" > /dev/null 2> "$RUNNER_TEMP/compare.err"; then
+          echo "supported=true" >> "$GITHUB_OUTPUT"
+        elif grep -qE "HTTP (403|404)" "$RUNNER_TEMP/compare.err"; then
+          echo "supported=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::Dependency review skipped: this repo has no dependency graph (private repos need GitHub Advanced Security). Set dependency-review: false to silence this."
+          echo "> Dependency review skipped: no dependency graph on this repo." >> "$GITHUB_STEP_SUMMARY"
+        else
+          cat "$RUNNER_TEMP/compare.err" >&2
+          exit 1
+        fi
+    - name: Review dependency changes
+      id: review
+      if: steps.check.outputs.supported == 'true'
+      uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+      with:
+        fail-on-severity: ${{ inputs.dependency-review-severity }}
+        warn-only: ${{ !inputs.enforce-security }}
+    - name: Save result
+      if: always() && steps.review.outcome == 'success'
+      env:
+        CHANGES: ${{ steps.review.outputs.vulnerable-changes }}
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+        printf '%s' "${CHANGES:-[]}" > "$out/dependency-review.json"
+        jq 'length' "$out/dependency-review.json" > "$out/findings.txt"
+    # @include upload-reports.yml
+
+sbom:
+  name: SBOM (Syft)
+  if: inputs.sbom
+  runs-on: ${{ inputs.runs-on }}
+  timeout-minutes: 15
+  permissions:
+    contents: read # check out the code
+  steps:
+    # @include checkout.yml
+    - name: Prepare report directory
+      run: mkdir -p "$RUNNER_TEMP/reports"
+    - name: Generate SPDX SBOM
+      uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      with:
+        path: ${{ inputs.working-directory }}
+        format: spdx-json
+        output-file: ${{ runner.temp }}/reports/sbom.spdx.json
+        upload-artifact: false
+        upload-release-assets: false
+    # @include upload-reports.yml

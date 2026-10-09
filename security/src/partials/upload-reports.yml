@@ -1,0 +1,21 @@
+# Reports are staged under a directory named for the job, so every artifact
+# unpacks to <job>/... . Downloaders then use merge-multiple and get the same
+# layout whether one artifact matches or many; without merging, a single match
+# is unpacked flat and the job name is lost.
+- name: Stage reports
+  if: always()
+  env:
+    JOB: ${{ github.job }}
+  run: |
+    if [ -d "$RUNNER_TEMP/reports" ]; then
+      mkdir -p "$RUNNER_TEMP/upload/$JOB"
+      cp -R "$RUNNER_TEMP/reports/." "$RUNNER_TEMP/upload/$JOB/"
+    fi
+- name: Upload reports
+  if: always()
+  uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+  with:
+    name: ${{ inputs.artifact-prefix }}.reports.${{ github.job }}
+    path: ${{ runner.temp }}/upload/
+    if-no-files-found: ignore
+    retention-days: 30

@@ -1,0 +1,233 @@
+# Infrastructure as code: Terraform, Kubernetes manifests and shell scripts,
+# plus the shared secret, Trivy, Semgrep and workflow scans. Built for Terraform
+# repos and for GitOps / Kustomize repos.
+#
+#   jobs:
+#     iac:
+#       uses: <org>/github-actions/.github/workflows/security-iac.yml@<sha> # v1
+#       permissions: { contents: read, security-events: write, actions: read }
+#       with:
+#         manifests-command: kustomize build apps/prod
+#
+# Mark "<caller job> / Summary" as the required check. See README.md.
+name: IaC
+
+on:
+  workflow_call:
+    inputs:
+      # @include inputs-base.yml
+      artifact-prefix:
+        description: Prefix for artifact names. Set it when one run calls this workflow more than once.
+        type: string
+        default: iac
+      tflint:
+        description: Run tflint over every Terraform directory.
+        type: boolean
+        default: true
+      tflint-config:
+        description: tflint config, relative to working-directory. It is passed as an absolute path, because --recursive otherwise looks for a config in each directory and silently runs without your plugins.
+        type: string
+        default: .tflint.hcl
+      manifests-command:
+        description: Command that prints rendered Kubernetes manifests to stdout (e.g. "kustomize build apps/prod"). Runs in working-directory.
+        type: string
+        default: ""
+      manifests-path:
+        description: Directory or file of plain Kubernetes manifests, used when manifests-command is empty.
+        type: string
+        default: ""
+      kube-linter-config:
+        description: kube-linter config, relative to working-directory. Used when present.
+        type: string
+        default: .kube-linter.yaml
+      conftest-policy:
+        description: Directory of OPA/Rego policies for conftest, relative to working-directory. Skipped when absent. Policy tests (*_test.rego) always block.
+        type: string
+        default: policy
+      shellcheck:
+        description: Run shellcheck over tracked *.sh and *.bash files.
+        type: boolean
+        default: true
+      shellcheck-severity:
+        description: Lowest shellcheck severity to report (error, warning, info, style). "info" includes SC2086, unquoted expansions.
+        type: string
+        default: info
+      semgrep-rules:
+        description: Space-separated Semgrep registry rulesets.
+        type: string
+        default: p/terraform p/kubernetes p/dockerfile p/secrets
+
+permissions: {}
+
+jobs:
+  terraform:
+    name: Terraform lint (tflint)
+    if: inputs.tflint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      # @include install-tflint.yml
+      - name: Lint
+        id: scan
+        env:
+          WD: ${{ inputs.working-directory }}
+          CONFIG: ${{ inputs.tflint-config }}
+          # Read-only: avoids the API rate limit when tflint downloads rule plugins.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          cd "$WD"
+          sarif="$out/tflint.sarif"
+          {
+            echo "sarif=$sarif"
+            echo "tool=tflint"
+            echo "base=$WD"
+          } >> "$GITHUB_OUTPUT"
+          if [ -z "$(git ls-files '*.tf' | head -n 1)" ]; then
+            echo "No Terraform files; nothing to lint."
+            jq -n '{version: "2.1.0", runs: [{tool: {driver: {name: "tflint"}}, results: []}]}' > "$sarif"
+            exit 0
+          fi
+          args=(--recursive)
+          if [ -f "$CONFIG" ]; then
+            args+=(--config "$PWD/$CONFIG")
+            tflint --init --config "$PWD/$CONFIG"
+          fi
+          # Record which rulesets actually loaded: a linter with no plugins is green over nothing.
+          {
+            echo "### tflint plugins"
+            echo '```'
+            tflint --version ${CONFIG:+--config "$PWD/$CONFIG"} 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          tflint "${args[@]}" --format sarif --force > "$sarif"
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  kubernetes:
+    name: Kubernetes posture and policy (kube-linter, conftest)
+    if: inputs.manifests-command != '' || inputs.manifests-path != ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      # @include install-kube-linter.yml
+      # @include install-conftest.yml
+      - name: Lint and test manifests
+        id: scan
+        env:
+          WD: ${{ inputs.working-directory }}
+          RENDER: ${{ inputs.manifests-command }}
+          MANIFESTS: ${{ inputs.manifests-path }}
+          KL_CONFIG: ${{ inputs.kube-linter-config }}
+          POLICY: ${{ inputs.conftest-policy }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out" "$RUNNER_TEMP/k8s"
+          cd "$WD"
+          if [ -n "$RENDER" ]; then
+            target="$RUNNER_TEMP/k8s/rendered.yaml"
+            bash -euo pipefail -c "$RENDER" > "$target"
+          else
+            target="$MANIFESTS"
+          fi
+          kl=(lint --format sarif)
+          if [ -f "$KL_CONFIG" ]; then kl+=(--config "$KL_CONFIG"); fi
+          # Exit 1 means "findings"; a missing or invalid SARIF means the tool failed.
+          kube-linter "${kl[@]}" "$target" > "$RUNNER_TEMP/k8s/kube-linter.sarif" || true
+          jq -e '.runs' "$RUNNER_TEMP/k8s/kube-linter.sarif" > /dev/null
+          sarifs=("$RUNNER_TEMP/k8s/kube-linter.sarif")
+          if [ -d "$POLICY" ]; then
+            # Policy unit tests always block: a broken policy passes everything.
+            if [ -n "$(find "$POLICY" -name '*_test.rego' -print -quit)" ]; then
+              conftest verify --policy "$POLICY"
+            fi
+            conftest test --policy "$POLICY" --all-namespaces --no-fail --output sarif "$target" > "$RUNNER_TEMP/k8s/conftest.sarif"
+            sarifs+=("$RUNNER_TEMP/k8s/conftest.sarif")
+          fi
+          jq -s '{version: "2.1.0", "$schema": "https://json.schemastore.org/sarif-2.1.0.json", runs: [.[].runs[]]}' \
+            "${sarifs[@]}" > "$out/kubernetes.sarif"
+          {
+            echo "sarif=$out/kubernetes.sarif"
+            echo "tool=kube-linter + conftest"
+            echo "base=$WD"
+          } >> "$GITHUB_OUTPUT"
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  shell:
+    name: Shell scripts (shellcheck)
+    if: inputs.shellcheck
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      # @include install-shellcheck.yml
+      - name: Lint
+        id: scan
+        env:
+          WD: ${{ inputs.working-directory }}
+          SEVERITY: ${{ inputs.shellcheck-severity }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          # Repo-root-relative paths, so SARIF locations resolve in code scanning.
+          mapfile -d '' files < <(cd "$WD" && git ls-files -z --full-name -- '*.sh' '*.bash')
+          rc=0
+          if [ "${#files[@]}" -gt 0 ]; then
+            shellcheck --format=json1 --severity="$SEVERITY" "${files[@]}" > "$RUNNER_TEMP/shellcheck.json" || rc=$?
+          else
+            echo '{"comments": []}' > "$RUNNER_TEMP/shellcheck.json"
+          fi
+          # 0 = clean, 1 = findings; 2+ = shellcheck could not run.
+          if [ "$rc" -gt 1 ]; then echo "::error::shellcheck failed (exit $rc)"; exit 1; fi
+          jq '{version: "2.1.0", "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+               runs: [{tool: {driver: {name: "shellcheck", informationUri: "https://www.shellcheck.net"}},
+                 results: [.comments[] | {
+                   ruleId: "SC\(.code)",
+                   level: ({"error": "error", "warning": "warning"}[.level] // "note"),
+                   message: {text: .message},
+                   helpUri: "https://www.shellcheck.net/wiki/SC\(.code)",
+                   locations: [{physicalLocation: {artifactLocation: {uri: .file},
+                     region: {startLine: .line, startColumn: .column}}}]}]}]}' \
+            "$RUNNER_TEMP/shellcheck.json" > "$out/shellcheck.sarif"
+          echo "Checked ${#files[@]} script(s)" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "sarif=$out/shellcheck.sarif"
+            echo "tool=shellcheck"
+          } >> "$GITHUB_OUTPUT"
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
+  # @include jobs-shared-security.yml
+
+  summary:
+    name: Summary
+    if: always()
+    needs: [terraform, kubernetes, shell, semgrep, secrets, trivy, workflow-audit]
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the code
+      pull-requests: write # post the sticky PR comment; capped by the caller's grant, so a caller that omits it just gets a 403-warn, not a failure
+    env:
+      REQUIRED_REPORTS: terraform kubernetes shell semgrep secrets trivy workflow-audit
+    steps:
+      # @include summary-steps.yml

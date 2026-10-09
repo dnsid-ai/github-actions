@@ -1,0 +1,20 @@
+# Self-test target. CANARY: kube-linter must flag the privileged container, and
+# the conftest policy must flag the image without a digest.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fixture
+  namespace: fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: fixture }
+  template:
+    metadata:
+      labels: { app: fixture }
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.27
+          securityContext:
+            privileged: true

@@ -1,0 +1,6 @@
+# Replaces Semgrep's built-in ignore list, which skips every tests/ directory.
+# This repo's self-test fixtures live under security/tests/fixtures/ and must be
+# scanned, or the Semgrep canaries (and the zero-files check) fail.
+.git/
+node_modules/
+.venv/
