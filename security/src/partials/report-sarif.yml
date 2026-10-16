@@ -26,15 +26,23 @@
     filter='[.runs[]?.results[]? | select(($levels == "") or ((.level // "warning") as $l | $levels | split(" ") | index($l)))]'
     count=$(jq --arg levels "$LEVELS" "$filter | length" "$SARIF")
     echo "$count" > "$(dirname "$SARIF")/findings.txt"
+    # Render the rows to a file first, then head the file. Piping `jq | head`
+    # breaks under `set -o pipefail`: when there are >100 findings, head closes
+    # the pipe after 100 lines and jq dies with "writing output failed: Broken
+    # pipe", failing the whole job (seen on CodeQL with a large PR).
+    rows="$(dirname "$SARIF")/report-rows.md"; : > "$rows"
+    if [ "$count" -gt 0 ]; then
+      jq -r --arg levels "$LEVELS" "$filter"'[] | [(.level // "warning"), (.ruleId // "-"),
+          ((.locations[0].physicalLocation.artifactLocation.uri // "-") + ":" + ((.locations[0].physicalLocation.region.startLine // "") | tostring))]
+        | map(tostring | gsub("\\|"; "\\|")) | "| \(.[0]) | `\(.[1])` | `\(.[2])` |"' "$SARIF" > "$rows"
+    fi
     {
       echo "### $TOOL: $count finding(s)${LEVELS:+ (levels: $LEVELS)}"
       if [ "$count" -gt 0 ]; then
         echo
         echo "| Level | Rule | Location |"
         echo "|---|---|---|"
-        jq -r --arg levels "$LEVELS" "$filter"'[] | [(.level // "warning"), (.ruleId // "-"),
-            ((.locations[0].physicalLocation.artifactLocation.uri // "-") + ":" + ((.locations[0].physicalLocation.region.startLine // "") | tostring))]
-          | map(tostring | gsub("\\|"; "\\|")) | "| \(.[0]) | `\(.[1])` | `\(.[2])` |"' "$SARIF" | head -n 100
+        head -n 100 "$rows"
         if [ "$count" -gt 100 ]; then echo "| | $((count - 100)) more in the reports artifact | |"; fi
       fi
       echo
