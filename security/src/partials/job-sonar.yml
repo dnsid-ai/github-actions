@@ -2,7 +2,7 @@
 # summary job publishes the same reports as the <prefix>.sonar-reports artifact.
 sonar:
   name: SonarQube
-  if: always() && inputs.sonar-host-url != ''
+  if: ${{ (always() && inputs.sonar-host-url != '') && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
   needs: [lint, test, deps, semgrep, secrets, trivy, workflow-audit]
   runs-on: ${{ inputs.runs-on }}
   timeout-minutes: 20

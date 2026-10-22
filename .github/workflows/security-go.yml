@@ -142,6 +142,7 @@ permissions: {}
 
 jobs:
   lint:
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Lint (gofmt, go vet, golangci-lint)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -242,6 +243,7 @@ jobs:
           retention-days: 30
 
   test:
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Test
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30
@@ -356,6 +358,7 @@ jobs:
           retention-days: 30
 
   deps:
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Dependency vulnerabilities (govulncheck)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -534,6 +537,7 @@ jobs:
           retention-days: 30
 
   gosec:
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: SAST (gosec)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -709,7 +713,7 @@ jobs:
 
   codeql:
     name: SAST (CodeQL)
-    if: inputs.codeql
+    if: ${{ (inputs.codeql) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
     permissions:
@@ -889,7 +893,7 @@ jobs:
 
   semgrep:
     name: SAST (Semgrep)
-    if: inputs.semgrep
+    if: ${{ (inputs.semgrep) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -1043,7 +1047,7 @@ jobs:
 
   secrets:
     name: Secrets (gitleaks)
-    if: inputs.gitleaks
+    if: ${{ (inputs.gitleaks) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
@@ -1181,7 +1185,7 @@ jobs:
 
   trivy:
     name: Vulnerabilities, misconfig and secrets (Trivy)
-    if: inputs.trivy
+    if: ${{ (inputs.trivy) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -1323,7 +1327,7 @@ jobs:
 
   workflow-audit:
     name: Workflow security (zizmor)
-    if: inputs.workflow-audit
+    if: ${{ (inputs.workflow-audit) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
@@ -1470,7 +1474,7 @@ jobs:
           retention-days: 30
   dependency-review:
     name: Dependency review
-    if: inputs.dependency-review && github.event_name == 'pull_request'
+    if: ${{ (inputs.dependency-review && github.event_name == 'pull_request') && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
@@ -1540,7 +1544,7 @@ jobs:
 
   sbom:
     name: SBOM (Syft)
-    if: inputs.sbom
+    if: ${{ (inputs.sbom) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
@@ -1585,7 +1589,7 @@ jobs:
   # summary job publishes the same reports as the <prefix>.sonar-reports artifact.
   sonar:
     name: SonarQube
-    if: always() && inputs.sonar-host-url != ''
+    if: ${{ (always() && inputs.sonar-host-url != '') && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     needs: [lint, test, deps, semgrep, secrets, trivy, workflow-audit]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20

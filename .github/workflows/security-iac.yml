@@ -102,7 +102,7 @@ permissions: {}
 jobs:
   terraform:
     name: Terraform lint (tflint)
-    if: inputs.tflint
+    if: ${{ (inputs.tflint) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -259,7 +259,7 @@ jobs:
 
   kubernetes:
     name: Kubernetes posture and policy (kube-linter, conftest)
-    if: inputs.manifests-command != '' || inputs.manifests-path != ''
+    if: ${{ (inputs.manifests-command != '' || inputs.manifests-path != '') && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -434,7 +434,7 @@ jobs:
 
   shell:
     name: Shell scripts (shellcheck)
-    if: inputs.shellcheck
+    if: ${{ (inputs.shellcheck) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
@@ -592,7 +592,7 @@ jobs:
 
   semgrep:
     name: SAST (Semgrep)
-    if: inputs.semgrep
+    if: ${{ (inputs.semgrep) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -746,7 +746,7 @@ jobs:
 
   secrets:
     name: Secrets (gitleaks)
-    if: inputs.gitleaks
+    if: ${{ (inputs.gitleaks) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
@@ -884,7 +884,7 @@ jobs:
 
   trivy:
     name: Vulnerabilities, misconfig and secrets (Trivy)
-    if: inputs.trivy
+    if: ${{ (inputs.trivy) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -1026,7 +1026,7 @@ jobs:
 
   workflow-audit:
     name: Workflow security (zizmor)
-    if: inputs.workflow-audit
+    if: ${{ (inputs.workflow-audit) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:

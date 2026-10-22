@@ -67,6 +67,7 @@ permissions: {}
 
 jobs:
   image:
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Image scan (Trivy)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45

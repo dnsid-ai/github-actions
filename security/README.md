@@ -20,6 +20,18 @@ Every workflow ends in a **Summary** job, which:
 - writes one table of results and findings to the run page;
 - publishes every report, bundled, as the `<prefix>.sonar-reports` artifact.
 
+### When the scans run
+
+The scan jobs run when a PR is **opened, reopened, or marked ready for review**
+(and on any non-`pull_request` trigger the caller uses, e.g. push or schedule).
+They **do not re-run on every push to an open PR** — that would re-run CodeQL,
+Trivy, Semgrep and the rest on each commit for no added signal. The **Summary**
+job still runs on every event, so the one required check always reports.
+
+To force a full re-scan of the current commit (for example, before merging after
+a round of pushes), add the **`rerun-security`** label to the PR; the next push
+runs the whole suite. Removing the label returns to the open-only behaviour.
+
 ## What the tools are
 
 | Kind | Plain English | Tools here |
