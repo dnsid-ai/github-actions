@@ -3,7 +3,11 @@
 # tag or branch), and keep the version comment beside it.
 #
 # Then make "python / Summary" a required status check on main. It fails if any job
-# fails, or if a scanner silently produced no report.
+# fails, or if a scanner silently produced no report. It also goes red on a push
+# that was not scanned: the security scans run on PR open/reopen, not on every
+# push, so add the 'rerun-security' label and push again (or reopen the PR) to
+# scan the latest commit before merging. See the security-workflows README,
+# "When the scans run".
 name: CI
 
 on:

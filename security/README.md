@@ -17,6 +17,7 @@ Every workflow ends in a **Summary** job, which:
 
 - fails if any job failed;
 - fails if a scanner job "succeeded" without writing a report (a gate that is green over nothing);
+- **fails on a push that wasn't scanned** — the security scans don't re-run on every push (see below), so this keeps an unscanned commit from merging green;
 - writes one table of results and findings to the run page;
 - publishes every report, bundled, as the `<prefix>.sonar-reports` artifact.
 
@@ -27,9 +28,22 @@ trigger the caller uses, e.g. push to a branch or schedule). They **do not re-ru
 on every push to an open PR** — that would re-run CodeQL, Trivy, Semgrep and the
 rest on each commit for no added signal.
 
-**Lint and unit tests still run on every push** — only the security scanners are
-throttled, so ordinary CI feedback (gofmt, vet, ruff, tsc, your tests) is never
-withheld on a push.
+What keeps running on every push depends on the workflow:
+
+- **go / python / typescript** — `lint` and `test` run on every push; the
+  scanners (dependency checks, CodeQL, Semgrep, gitleaks, Trivy, zizmor, SBOM,
+  dependency review, Sonar) are throttled.
+- **iac** — the fast checks run on every push: `tflint`, `shellcheck`, and
+  `kube-linter` + conftest (including the `*_test.rego` policy tests); the
+  scanners shared with the other workflows (Semgrep, gitleaks, Trivy, zizmor,
+  Sonar) are throttled.
+- **container** — scan-only. Its one job builds the image and scans it, so on a
+  `synchronize` push it skips entirely and re-runs on open/reopen (or with the
+  label). There is no separate build-only check.
+- **dast** — triggered on dispatch/schedule, so none of this applies.
+
+Custom Semgrep rules run inside the (throttled) Semgrep job, so their
+`tests/semgrep/` tests run on open/reopen, not on every push.
 
 So the gate stays honest, the **Summary** check **fails on a push that wasn't
 scanned** (it does not go green over an unscanned commit). A commit cannot be
@@ -45,6 +59,13 @@ true`**. Then the scans run on every push and the Summary never fails for an
 unscanned commit. This is for callers whose whole purpose is to run the scanners
 — this repo's own `security-self-test` sets it — not for ordinary consumers,
 who get cheaper, open-only scanning by leaving it at its `false` default.
+
+**Heads-up for Dependabot and "Update branch".** Both push to the PR head, which
+fires `synchronize`. On a PR without the `rerun-security` label the Summary check
+then goes red until the current commit is scanned — add the label and push again,
+or reopen the PR. In a repo that requires branches to be up to date, or that
+auto-merges Dependabot PRs, expect a base-branch update to stall the PR this way;
+set `scan-every-push: true` if that trade-off isn't worth it for your repo.
 
 ## What the tools are
 

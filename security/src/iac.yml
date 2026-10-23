@@ -62,7 +62,7 @@ permissions: {}
 jobs:
   terraform:
     name: Terraform lint (tflint)
-    if: ${{ (inputs.tflint) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ inputs.tflint }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -113,7 +113,7 @@ jobs:
 
   kubernetes:
     name: Kubernetes posture and policy (kube-linter, conftest)
-    if: ${{ (inputs.manifests-command != '' || inputs.manifests-path != '') && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ inputs.manifests-command != '' || inputs.manifests-path != '' }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -169,7 +169,7 @@ jobs:
 
   shell:
     name: Shell scripts (shellcheck)
-    if: ${{ (inputs.shellcheck) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ inputs.shellcheck }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:

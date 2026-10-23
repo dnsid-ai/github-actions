@@ -158,20 +158,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: The require-scan step is the exact negation of the scan-job gate
-        # The self-test callers all set scan-every-push: true, so the skip path and
-        # the "Require a scan" failure never execute in CI. Assert statically that
-        # every generated workflow carries the gate verbatim and that its Summary
-        # require-scan condition is the gate's exact negation: a dropped "!" — which
-        # would let an unscanned commit go green — fails here.
-        run: |
-          set -euo pipefail
-          gate="inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')"
-          req="!inputs.scan-every-push && github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security')"
-          fail=0
-          for w in go python typescript iac container dast; do
-            f=".github/workflows/security-$w.yml"
-            grep -qF -- "$gate" "$f" || { echo "::error::$f: scan-job gate string missing"; fail=1; }
-            grep -qF -- "$req" "$f"  || { echo "::error::$f: require-scan condition is not the gate's exact negation"; fail=1; }
-          done
-          exit "$fail"
+      - name: Scan gate, its negation, and ungated lint/test jobs are correct
+        # The self-test callers all set scan-every-push: true, so the skip path,
+        # the "Require a scan" failure and the ungated-lint promise never execute
+        # at runtime. This static per-job check is the guard.
+        run: python3 scripts/check-gate-invariants.py
