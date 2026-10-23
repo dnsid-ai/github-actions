@@ -156,6 +156,8 @@ jobs:
       contents: read # read the generated workflows
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: The require-scan step is the exact negation of the scan-job gate
         # The self-test callers all set scan-every-push: true, so the skip path and
         # the "Require a scan" failure never execute in CI. Assert statically that
