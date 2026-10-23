@@ -24,6 +24,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       working-directory: security/tests/fixtures/go
       upload-sarif: false
       sbom: true
@@ -36,6 +37,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       working-directory: security/tests/fixtures/python-uv
       artifact-prefix: python-uv
       upload-sarif: false
@@ -48,6 +50,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       working-directory: security/tests/fixtures/python-pip
       artifact-prefix: python-pip
       upload-sarif: false
@@ -61,6 +64,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       working-directory: security/tests/fixtures/typescript
       upload-sarif: false
 
@@ -72,6 +76,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       working-directory: security/tests/fixtures/iac
       manifests-path: k8s
       upload-sarif: false
@@ -84,6 +89,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       context: security/tests/fixtures/container
       dockerfile: security/tests/fixtures/container/Dockerfile
       upload-sarif: false

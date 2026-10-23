@@ -36,6 +36,12 @@ the **`rerun-security`** label to the PR and push again (or reopen the PR); the
 whole suite runs and Summary goes green. Removing the label returns to the
 open-only behaviour.
 
+A caller that genuinely wants every commit scanned can set **`scan-every-push:
+true`**. Then the scans run on every push and the Summary never fails for an
+unscanned commit. This is for callers whose whole purpose is to run the scanners
+— this repo's own `security-self-test` sets it — not for ordinary consumers,
+who get cheaper, open-only scanning by leaving it at its `false` default.
+
 ## What the tools are
 
 | Kind | Plain English | Tools here |

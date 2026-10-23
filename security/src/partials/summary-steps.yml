@@ -10,7 +10,7 @@
 # keeps the gate honest: a pushed-but-unscanned commit cannot be merged until it
 # is scanned.
 - name: Require a scan of the current commit
-  if: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+  if: ${{ !inputs.scan-every-push && github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
   run: |
     msg="Security scans do not re-run on each push, so this commit was not scanned. To scan it before merging, add the 'rerun-security' label to the PR and push again (or reopen the PR)."
     echo "::error::$msg"

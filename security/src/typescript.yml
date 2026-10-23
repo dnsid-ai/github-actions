@@ -75,7 +75,7 @@ permissions: {}
 
 jobs:
   lint:
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Lint, format and typecheck
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -115,7 +115,7 @@ jobs:
       # @include upload-reports.yml
 
   test:
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Test
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30
@@ -164,7 +164,7 @@ jobs:
       # @include upload-reports.yml
 
   deps:
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Dependency vulnerabilities and install scripts (osv-scanner)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -226,7 +226,7 @@ jobs:
 
   codeql:
     name: SAST (CodeQL)
-    if: ${{ (inputs.codeql) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ (inputs.codeql) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
     permissions:

@@ -1,6 +1,6 @@
 dependency-review:
   name: Dependency review
-  if: ${{ (inputs.dependency-review && github.event_name == 'pull_request') && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+  if: ${{ (inputs.dependency-review && github.event_name == 'pull_request') && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
   runs-on: ${{ inputs.runs-on }}
   timeout-minutes: 10
   permissions:
@@ -50,7 +50,7 @@ dependency-review:
 
 sbom:
   name: SBOM (Syft)
-  if: ${{ (inputs.sbom) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+  if: ${{ (inputs.sbom) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
   runs-on: ${{ inputs.runs-on }}
   timeout-minutes: 15
   permissions:

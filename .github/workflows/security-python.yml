@@ -28,6 +28,15 @@ on:
           tool errors always fail regardless.
         type: boolean
         default: false
+      scan-every-push:
+        description: >-
+          Run the security scans on every pushed commit, not only on PR open/reopen.
+          Off by default: scans run on open/reopen (or when the 'rerun-security' label
+          is present), and the Summary check fails on any pushed-but-unscanned commit.
+          Set true for callers that genuinely want every commit scanned — for example
+          this repo's own security-self-test, which exists to run the scanners.
+        type: boolean
+        default: false
       upload-sarif:
         description: Upload SARIF results to GitHub code scanning (private repos need Advanced Security).
         type: boolean
@@ -131,7 +140,7 @@ permissions: {}
 
 jobs:
   lint:
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Lint (ruff, mypy) and security lint (ruff S)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -343,7 +352,7 @@ jobs:
           retention-days: 30
 
   test:
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Test (pytest)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30
@@ -477,7 +486,7 @@ jobs:
           retention-days: 30
 
   deps:
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Dependency vulnerabilities (pip-audit)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -703,7 +712,7 @@ jobs:
 
   codeql:
     name: SAST (CodeQL)
-    if: ${{ (inputs.codeql) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ (inputs.codeql) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
     permissions:
@@ -845,7 +854,7 @@ jobs:
 
   semgrep:
     name: SAST (Semgrep)
-    if: ${{ (inputs.semgrep) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ (inputs.semgrep) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -999,7 +1008,7 @@ jobs:
 
   secrets:
     name: Secrets (gitleaks)
-    if: ${{ (inputs.gitleaks) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ (inputs.gitleaks) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
@@ -1137,7 +1146,7 @@ jobs:
 
   trivy:
     name: Vulnerabilities, misconfig and secrets (Trivy)
-    if: ${{ (inputs.trivy) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ (inputs.trivy) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -1279,7 +1288,7 @@ jobs:
 
   workflow-audit:
     name: Workflow security (zizmor)
-    if: ${{ (inputs.workflow-audit) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ (inputs.workflow-audit) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
@@ -1426,7 +1435,7 @@ jobs:
           retention-days: 30
   dependency-review:
     name: Dependency review
-    if: ${{ (inputs.dependency-review && github.event_name == 'pull_request') && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ (inputs.dependency-review && github.event_name == 'pull_request') && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
@@ -1496,7 +1505,7 @@ jobs:
 
   sbom:
     name: SBOM (Syft)
-    if: ${{ (inputs.sbom) && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ (inputs.sbom) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
@@ -1541,7 +1550,7 @@ jobs:
   # summary job publishes the same reports as the <prefix>.sonar-reports artifact.
   sonar:
     name: SonarQube
-    if: ${{ (always() && inputs.sonar-host-url != '') && (github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    if: ${{ (always() && inputs.sonar-host-url != '') && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     needs: [lint, test, deps, semgrep, secrets, trivy, workflow-audit]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -1608,7 +1617,7 @@ jobs:
       # keeps the gate honest: a pushed-but-unscanned commit cannot be merged until it
       # is scanned.
       - name: Require a scan of the current commit
-        if: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+        if: ${{ !inputs.scan-every-push && github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
         run: |
           msg="Security scans do not re-run on each push, so this commit was not scanned. To scan it before merging, add the 'rerun-security' label to the PR and push again (or reopen the PR)."
           echo "::error::$msg"

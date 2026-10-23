@@ -22,6 +22,13 @@ on:
         description: Runner label. Must be Linux x64.
         type: string
         default: ubuntu-24.04
+      scan-every-push:
+        description: >-
+          Run the security scans on every pushed commit, not only on PR
+          open/reopen. Off by default; set true for callers that want every
+          commit scanned (e.g. this repo's own security-self-test).
+        type: boolean
+        default: false
       artifact-prefix:
         description: Prefix for artifact names. Set it when one run calls this workflow more than once (e.g. one call per image).
         type: string
@@ -67,7 +74,7 @@ permissions: {}
 
 jobs:
   image:
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Image scan (Trivy)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
@@ -263,7 +270,7 @@ jobs:
       # keeps the gate honest: a pushed-but-unscanned commit cannot be merged until it
       # is scanned.
       - name: Require a scan of the current commit
-        if: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+        if: ${{ !inputs.scan-every-push && github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
         run: |
           msg="Security scans do not re-run on each push, so this commit was not scanned. To scan it before merging, add the 'rerun-security' label to the PR and push again (or reopen the PR)."
           echo "::error::$msg"
