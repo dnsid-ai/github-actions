@@ -28,6 +28,15 @@ on:
           tool errors always fail regardless.
         type: boolean
         default: false
+      scan-every-push:
+        description: >-
+          Run the security scans on every pushed commit, not only on PR open/reopen.
+          Off by default: scans run on open/reopen (or when the 'rerun-security' label
+          is present), and the Summary check fails on any pushed-but-unscanned commit.
+          Set true for callers that genuinely want every commit scanned — for example
+          this repo's own security-self-test, which exists to run the scanners.
+        type: boolean
+        default: false
       upload-sarif:
         description: Upload SARIF results to GitHub code scanning (private repos need Advanced Security).
         type: boolean
@@ -475,6 +484,7 @@ jobs:
           retention-days: 30
 
   deps:
+    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Dependency vulnerabilities (pip-audit)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -700,7 +710,7 @@ jobs:
 
   codeql:
     name: SAST (CodeQL)
-    if: inputs.codeql
+    if: ${{ (inputs.codeql) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
     permissions:
@@ -842,7 +852,7 @@ jobs:
 
   semgrep:
     name: SAST (Semgrep)
-    if: inputs.semgrep
+    if: ${{ (inputs.semgrep) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -996,7 +1006,7 @@ jobs:
 
   secrets:
     name: Secrets (gitleaks)
-    if: inputs.gitleaks
+    if: ${{ (inputs.gitleaks) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
@@ -1134,7 +1144,7 @@ jobs:
 
   trivy:
     name: Vulnerabilities, misconfig and secrets (Trivy)
-    if: inputs.trivy
+    if: ${{ (inputs.trivy) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -1276,7 +1286,7 @@ jobs:
 
   workflow-audit:
     name: Workflow security (zizmor)
-    if: inputs.workflow-audit
+    if: ${{ (inputs.workflow-audit) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
@@ -1423,7 +1433,7 @@ jobs:
           retention-days: 30
   dependency-review:
     name: Dependency review
-    if: inputs.dependency-review && github.event_name == 'pull_request'
+    if: ${{ (inputs.dependency-review && github.event_name == 'pull_request') && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
@@ -1493,7 +1503,7 @@ jobs:
 
   sbom:
     name: SBOM (Syft)
-    if: inputs.sbom
+    if: ${{ (inputs.sbom) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
@@ -1538,7 +1548,7 @@ jobs:
   # summary job publishes the same reports as the <prefix>.sonar-reports artifact.
   sonar:
     name: SonarQube
-    if: always() && inputs.sonar-host-url != ''
+    if: ${{ (always() && inputs.sonar-host-url != '') && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
     needs: [lint, test, deps, semgrep, secrets, trivy, workflow-audit]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -1597,6 +1607,33 @@ jobs:
       # failed, and when a scanner job "succeeded" without writing a report: that
       # would be a gate that is green over nothing. The job needs `env.REQUIRED_REPORTS`,
       # the space-separated ids of jobs that must leave a report whenever they run.
+      #
+      # It also fails when the scans were skipped for this commit. The scan jobs do
+      # not re-run on every push to an open PR (they run on open or reopen, or when
+      # the `rerun-security` label is present); without this, the required check would
+      # go green over an unscanned commit, so unscanned code could merge. Failing here
+      # keeps the gate honest: a pushed-but-unscanned commit cannot be merged until it
+      # is scanned.
+      - name: Require a scan of the current commit
+        if: ${{ !inputs.scan-every-push && github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+        env:
+          PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          msg="Security scans do not re-run on each push, so this commit was not scanned. To scan it before merging, add the 'rerun-security' label to the PR and push again (or reopen the PR)."
+          echo "::error::$msg"
+          # Write the sticky-comment body too, with the marker so the "Comment on the
+          # PR" step updates the same comment. Without this it exits before Summarize
+          # writes summary.md, leaving an earlier commit's green "passed" summary in
+          # the PR comment while this commit is unscanned.
+          md="$RUNNER_TEMP/summary.md"
+          {
+            echo "<!-- security-summary:$PREFIX -->"
+            echo "## $PREFIX: this commit was not scanned"
+            echo
+            echo "$msg"
+          } > "$md"
+          cat "$md" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
       - name: Download reports
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

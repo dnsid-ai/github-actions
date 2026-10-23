@@ -24,6 +24,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       working-directory: security/tests/fixtures/go
       upload-sarif: false
       sbom: true
@@ -36,6 +37,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       working-directory: security/tests/fixtures/python-uv
       artifact-prefix: python-uv
       upload-sarif: false
@@ -48,6 +50,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       working-directory: security/tests/fixtures/python-pip
       artifact-prefix: python-pip
       upload-sarif: false
@@ -61,6 +64,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       working-directory: security/tests/fixtures/typescript
       upload-sarif: false
 
@@ -72,6 +76,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       working-directory: security/tests/fixtures/iac
       manifests-path: k8s
       upload-sarif: false
@@ -84,6 +89,7 @@ jobs:
       actions: read # required by the called workflow's jobs
       pull-requests: write # the Summary job posts a sticky PR comment
     with:
+      scan-every-push: true
       context: security/tests/fixtures/container
       dockerfile: security/tests/fixtures/container/Dockerfile
       upload-sarif: false
@@ -142,3 +148,18 @@ jobs:
             fail=1
           fi
           exit "$fail"
+
+  gate-invariants:
+    name: Scan gate and its negation are exact
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # read the generated workflows
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan gate, its negation, and ungated lint/test jobs are correct
+        # The self-test callers all set scan-every-push: true, so the skip path,
+        # the "Require a scan" failure and the ungated-lint promise never execute
+        # at runtime. This static per-job check is the guard.
+        run: python3 scripts/check-gate-invariants.py
