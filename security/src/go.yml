@@ -74,7 +74,6 @@ permissions: {}
 
 jobs:
   lint:
-    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Lint (gofmt, go vet, golangci-lint)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -115,7 +114,6 @@ jobs:
       # @include upload-reports.yml
 
   test:
-    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
     name: Test
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30

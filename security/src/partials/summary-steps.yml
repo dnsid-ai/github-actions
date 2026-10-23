@@ -4,17 +4,30 @@
 # the space-separated ids of jobs that must leave a report whenever they run.
 #
 # It also fails when the scans were skipped for this commit. The scan jobs do
-# not re-run on every push to an open PR (they run on open/reopen/ready, or when
+# not re-run on every push to an open PR (they run on open or reopen, or when
 # the `rerun-security` label is present); without this, the required check would
 # go green over an unscanned commit, so unscanned code could merge. Failing here
 # keeps the gate honest: a pushed-but-unscanned commit cannot be merged until it
 # is scanned.
 - name: Require a scan of the current commit
   if: ${{ !inputs.scan-every-push && github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+  env:
+    PREFIX: ${{ inputs.artifact-prefix }}
   run: |
     msg="Security scans do not re-run on each push, so this commit was not scanned. To scan it before merging, add the 'rerun-security' label to the PR and push again (or reopen the PR)."
     echo "::error::$msg"
-    { echo "## Security: this commit was not scanned"; echo; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
+    # Write the sticky-comment body too, with the marker so the "Comment on the
+    # PR" step updates the same comment. Without this it exits before Summarize
+    # writes summary.md, leaving an earlier commit's green "passed" summary in
+    # the PR comment while this commit is unscanned.
+    md="$RUNNER_TEMP/summary.md"
+    {
+      echo "<!-- security-summary:$PREFIX -->"
+      echo "## $PREFIX: this commit was not scanned"
+      echo
+      echo "$msg"
+    } > "$md"
+    cat "$md" >> "$GITHUB_STEP_SUMMARY"
     exit 1
 - name: Download reports
   uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

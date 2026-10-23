@@ -27,6 +27,10 @@ trigger the caller uses, e.g. push to a branch or schedule). They **do not re-ru
 on every push to an open PR** — that would re-run CodeQL, Trivy, Semgrep and the
 rest on each commit for no added signal.
 
+**Lint and unit tests still run on every push** — only the security scanners are
+throttled, so ordinary CI feedback (gofmt, vet, ruff, tsc, your tests) is never
+withheld on a push.
+
 So the gate stays honest, the **Summary** check **fails on a push that wasn't
 scanned** (it does not go green over an unscanned commit). A commit cannot be
 merged until it has been scanned.
