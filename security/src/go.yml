@@ -74,6 +74,7 @@ permissions: {}
 
 jobs:
   lint:
+    if: ${{ inputs.lint }}
     name: Lint (gofmt, go vet, golangci-lint)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -114,6 +115,7 @@ jobs:
       # @include upload-reports.yml
 
   test:
+    if: ${{ inputs.test }}
     name: Test
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30

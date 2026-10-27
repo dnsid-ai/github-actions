@@ -76,6 +76,9 @@ jobs:
       # @include checkout.yml
       # @include setup-python-project.yml
       - name: Lint
+        # Style lint (ruff check/format, mypy). The security lint (ruff S) below
+        # always runs: `lint: false` drops the duplicate style checks, not SAST.
+        if: ${{ inputs.lint }}
         env:
           WD: ${{ inputs.working-directory }}
           FORMAT_CHECK: ${{ inputs.format-check }}
@@ -114,6 +117,7 @@ jobs:
       # @include upload-reports.yml
 
   test:
+    if: ${{ inputs.test }}
     name: Test (pytest)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30

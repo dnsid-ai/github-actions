@@ -30,9 +30,11 @@ rest on each commit for no added signal.
 
 What keeps running on every push depends on the workflow:
 
-- **go / python / typescript** — `lint` and `test` run on every push; the
-  scanners (dependency checks, CodeQL, Semgrep, gitleaks, Trivy, zizmor, SBOM,
-  dependency review, Sonar) are throttled.
+- **go / python / typescript** — `lint` and `test` run on every push (unless
+  turned off with `lint: false` / `test: false`); the scanners (dependency
+  checks, CodeQL, Semgrep, gitleaks, Trivy, zizmor, SBOM, dependency review,
+  Sonar) are throttled. In Python the ruff `S` security lint runs regardless of
+  `lint`.
 - **iac** — the fast checks run on every push: `tflint`, `shellcheck`, and
   `kube-linter` + conftest (including the `*_test.rego` policy tests); the
   scanners shared with the other workflows (Semgrep, gitleaks, Trivy, zizmor,
@@ -104,6 +106,14 @@ overlap, so either can be switched off with `codeql: false` or `semgrep: false`.
 5. **CodeQL "default setup".** If it's turned on for the repo, either set
    `codeql: false`, or have an admin switch the repo to advanced setup. Otherwise the
    upload is rejected. The job still passes, and its results stay in the artifact.
+6. **Don't run what the repo already runs.** Every job is on by default, so a repo
+   adopting the suite fresh gets the whole set. If the repo's own CI already lints or
+   tests, switch off the duplicate here with `lint: false` and/or `test: false` (Go,
+   Python and TypeScript), the same way `codeql: false` hands CodeQL to default setup.
+   Turn off only the jobs another workflow already owns — and note `test: false` also
+   drops this suite's coverage report, so keep coverage running somewhere. In Python,
+   `lint: false` drops the style checks only; the ruff `S` (bandit) security lint keeps
+   running, since it is SAST rather than a duplicate of your own linter.
 
 ### Baselines: where each tool reads its ignores
 
