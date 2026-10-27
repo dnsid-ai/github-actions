@@ -1218,7 +1218,8 @@ jobs:
           languages: ${{ inputs.codeql-languages }}
           # Interpreted languages (actions, JS/TS, Python) need no build step.
           build-mode: none
-          source-root: ${{ inputs.working-directory }}
+          # No source-root: `actions` scans the repo-root .github/workflows, which
+          # a working-directory subdir would hide. Other languages scan the root too.
           queries: ${{ inputs.codeql-queries }}
       - name: Analyze
         uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2

@@ -9,7 +9,7 @@ single **Summary** check to make required.
 | [`security-go.yml`](../.github/workflows/security-go.yml) | Go modules | lint (gofmt, go vet, golangci-lint) · test (race, coverage) · govulncheck · CodeQL · Semgrep · gitleaks · Trivy · zizmor · dependency review · SBOM · Sonar |
 | [`security-python.yml`](../.github/workflows/security-python.yml) | Python packages | lint (ruff, ruff format, mypy) + security lint (ruff S) · test (pytest + coverage) · pip-audit · CodeQL · Semgrep · gitleaks · Trivy · zizmor · dependency review · SBOM · Sonar |
 | [`security-typescript.yml`](../.github/workflows/security-typescript.yml) | npm / pnpm projects | lint, format, typecheck · test · osv-scanner + install-script check · CodeQL · Semgrep · gitleaks · Trivy · zizmor · dependency review · SBOM · Sonar |
-| [`security-iac.yml`](../.github/workflows/security-iac.yml) | Terraform, Kubernetes, shell | tflint · kube-linter + conftest (OPA/Rego) · shellcheck · Semgrep · gitleaks · Trivy · zizmor |
+| [`security-iac.yml`](../.github/workflows/security-iac.yml) | Terraform, Kubernetes, shell | tflint · kube-linter + conftest (OPA/Rego) · shellcheck · Semgrep · gitleaks · Trivy · zizmor · CodeQL (actions) |
 | [`security-container.yml`](../.github/workflows/security-container.yml) | Dockerfiles | build locally (no push) · Trivy image scan · SBOM of the image |
 | [`security-dast.yml`](../.github/workflows/security-dast.yml) | A running site | OWASP ZAP baseline (+ optional API scan) · Nuclei |
 
@@ -38,7 +38,7 @@ What keeps running on every push depends on the workflow:
 - **iac** — the fast checks run on every push: `tflint`, `shellcheck`, and
   `kube-linter` + conftest (including the `*_test.rego` policy tests); the
   scanners shared with the other workflows (Semgrep, gitleaks, Trivy, zizmor,
-  Sonar) are throttled.
+  CodeQL, Sonar) are throttled.
 - **container** — scan-only. Its one job builds the image and scans it, so on a
   `synchronize` push it skips entirely and re-runs on open/reopen (or with the
   label). There is no separate build-only check.
