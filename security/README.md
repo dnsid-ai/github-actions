@@ -9,7 +9,7 @@ single **Summary** check to make required.
 | [`security-go.yml`](../.github/workflows/security-go.yml) | Go modules | lint (gofmt, go vet, golangci-lint) · test (race, coverage) · govulncheck · CodeQL · Semgrep · gitleaks · Trivy · zizmor · dependency review · SBOM · Sonar |
 | [`security-python.yml`](../.github/workflows/security-python.yml) | Python packages | lint (ruff, ruff format, mypy) + security lint (ruff S) · test (pytest + coverage) · pip-audit · CodeQL · Semgrep · gitleaks · Trivy · zizmor · dependency review · SBOM · Sonar |
 | [`security-typescript.yml`](../.github/workflows/security-typescript.yml) | npm / pnpm projects | lint, format, typecheck · test · osv-scanner + install-script check · CodeQL · Semgrep · gitleaks · Trivy · zizmor · dependency review · SBOM · Sonar |
-| [`security-iac.yml`](../.github/workflows/security-iac.yml) | Terraform, Kubernetes, shell | tflint · kube-linter + conftest (OPA/Rego) · shellcheck · Semgrep · gitleaks · Trivy · zizmor |
+| [`security-iac.yml`](../.github/workflows/security-iac.yml) | Terraform, Kubernetes, shell | tflint · kube-linter + conftest (OPA/Rego) · shellcheck · Semgrep · gitleaks · Trivy · zizmor · CodeQL (actions) |
 | [`security-container.yml`](../.github/workflows/security-container.yml) | Dockerfiles | build locally (no push) · Trivy image scan · SBOM of the image |
 | [`security-dast.yml`](../.github/workflows/security-dast.yml) | A running site | OWASP ZAP baseline (+ optional API scan) · Nuclei |
 
@@ -38,7 +38,7 @@ What keeps running on every push depends on the workflow:
 - **iac** — the fast checks run on every push: `tflint`, `shellcheck`, and
   `kube-linter` + conftest (including the `*_test.rego` policy tests); the
   scanners shared with the other workflows (Semgrep, gitleaks, Trivy, zizmor,
-  Sonar) are throttled.
+  CodeQL, Sonar) are throttled.
 - **container** — scan-only. Its one job builds the image and scans it, so on a
   `synchronize` push it skips entirely and re-runs on open/reopen (or with the
   label). There is no separate build-only check.
@@ -114,6 +114,31 @@ overlap, so either can be switched off with `codeql: false` or `semgrep: false`.
    drops this suite's coverage report, so keep coverage running somewhere. In Python,
    `lint: false` drops the style checks only; the ruff `S` (bandit) security lint keeps
    running, since it is SAST rather than a duplicate of your own linter.
+
+### CodeQL on an infra/deploy repo (CodeQL-only)
+
+`security-iac.yml` has a `codeql` job (on by default) that scans the
+`codeql-languages` you give it — `actions` by default, i.e. the repo's GitHub
+workflow files (Terraform/HCL has no CodeQL analyzer). To replace a repo's
+per-repo CodeQL (a `codeql.yml` workflow or default setup) with one scan owned by
+this suite, keep `codeql` on and turn the other jobs off:
+
+```yaml
+with:
+  codeql: true
+  upload-sarif: true     # send results to the Security tab (needs code scanning)
+  tflint: false
+  shellcheck: false
+  semgrep: false
+  gitleaks: false
+  trivy: false
+  workflow-audit: false
+```
+
+Then remove the repo's own CodeQL so it is not scanned twice. Leave `upload-sarif`
+at its default (`true`) only where code scanning is available (public repos, or
+private repos with GitHub Advanced Security); otherwise results stay in the
+reports artifact.
 
 ### Baselines: where each tool reads its ignores
 
