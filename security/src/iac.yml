@@ -56,6 +56,23 @@ on:
         description: Space-separated Semgrep registry rulesets.
         type: string
         default: p/terraform p/kubernetes p/dockerfile p/secrets
+      codeql:
+        description: >-
+          Run CodeQL. For IaC repos this is mainly the `actions` language (the
+          GitHub workflow files); Terraform/HCL has no CodeQL analyzer. On by
+          default; set false if the repo uses CodeQL default setup instead. To run
+          this workflow as a CodeQL-only check, leave it on and turn the other jobs
+          off.
+        type: boolean
+        default: true
+      codeql-languages:
+        description: Comma-separated CodeQL languages (e.g. actions, javascript-typescript, python).
+        type: string
+        default: actions
+      codeql-queries:
+        description: CodeQL query suite (security-extended or security-and-quality).
+        type: string
+        default: security-extended
 
 permissions: {}
 
@@ -218,16 +235,46 @@ jobs:
 
   # @include jobs-shared-security.yml
 
+  codeql:
+    name: SAST (CodeQL)
+    if: ${{ (inputs.codeql) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 45
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      # @include checkout.yml
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ inputs.codeql-languages }}
+          # Interpreted languages (actions, JS/TS, Python) need no build step.
+          build-mode: none
+          source-root: ${{ inputs.working-directory }}
+          queries: ${{ inputs.codeql-queries }}
+      - name: Analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: ${{ inputs.artifact-prefix }}/codeql
+          upload: never
+          output: ${{ runner.temp }}/codeql
+      # @include codeql-collect.yml
+      # @include report-sarif.yml
+      # @include upload-sarif.yml
+      # @include upload-reports.yml
+
   summary:
     name: Summary
     if: always()
-    needs: [terraform, kubernetes, shell, semgrep, secrets, trivy, workflow-audit]
+    needs: [terraform, kubernetes, shell, semgrep, secrets, trivy, workflow-audit, codeql]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
       contents: read # check out the code
       pull-requests: write # post the sticky PR comment; capped by the caller's grant, so a caller that omits it just gets a 403-warn, not a failure
     env:
-      REQUIRED_REPORTS: terraform kubernetes shell semgrep secrets trivy workflow-audit
+      REQUIRED_REPORTS: terraform kubernetes shell semgrep secrets trivy workflow-audit codeql
     steps:
       # @include summary-steps.yml

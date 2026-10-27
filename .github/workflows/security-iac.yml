@@ -105,6 +105,23 @@ on:
         description: Space-separated Semgrep registry rulesets.
         type: string
         default: p/terraform p/kubernetes p/dockerfile p/secrets
+      codeql:
+        description: >-
+          Run CodeQL. For IaC repos this is mainly the `actions` language (the
+          GitHub workflow files); Terraform/HCL has no CodeQL analyzer. On by
+          default; set false if the repo uses CodeQL default setup instead. To run
+          this workflow as a CodeQL-only check, leave it on and turn the other jobs
+          off.
+        type: boolean
+        default: true
+      codeql-languages:
+        description: Comma-separated CodeQL languages (e.g. actions, javascript-typescript, python).
+        type: string
+        default: actions
+      codeql-queries:
+        description: CodeQL query suite (security-extended or security-and-quality).
+        type: string
+        default: security-extended
 
 permissions: {}
 
@@ -1181,17 +1198,157 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  codeql:
+    name: SAST (CodeQL)
+    if: ${{ (inputs.codeql) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 45
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload SARIF to code scanning
+      actions: read # code scanning reads run metadata on private repos
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ inputs.codeql-languages }}
+          # Interpreted languages (actions, JS/TS, Python) need no build step.
+          build-mode: none
+          source-root: ${{ inputs.working-directory }}
+          queries: ${{ inputs.codeql-queries }}
+      - name: Analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: ${{ inputs.artifact-prefix }}/codeql
+          upload: never
+          output: ${{ runner.temp }}/codeql
+      # CodeQL runs with upload: never so that a repo using CodeQL "default setup"
+      # (which rejects advanced-setup uploads) warns instead of failing. This step
+      # exposes its SARIF to the shared report and upload steps.
+      - name: Collect CodeQL results
+        id: scan
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reports"; mkdir -p "$out"
+          src=$(find "$RUNNER_TEMP/codeql" -name '*.sarif' | head -n 1)
+          if [ -z "$src" ]; then
+            echo "::error::CodeQL produced no SARIF"
+            exit 1
+          fi
+          cp "$src" "$out/codeql.sarif"
+          {
+            echo "sarif=$out/codeql.sarif"
+            echo "tool=CodeQL"
+          } >> "$GITHUB_OUTPUT"
+      # Turns the scan step's SARIF into: a findings count (read by the summary job),
+      # a table in the job summary, and, when enforce-security is on, a failing exit.
+      # The scan step must have id "scan" and set outputs `sarif`, `tool` and,
+      # optionally, `levels` (space-separated SARIF levels to count; empty = all) and
+      # `base` (the directory the tool's paths are relative to; they are rewritten to
+      # be repo-root-relative so code scanning can place them).
+      - name: Report findings
+        if: always() && steps.scan.outcome == 'success'
+        env:
+          ENFORCE: ${{ inputs.enforce-security }}
+          SARIF: ${{ steps.scan.outputs.sarif }}
+          TOOL: ${{ steps.scan.outputs.tool }}
+          LEVELS: ${{ steps.scan.outputs.levels }}
+          BASE: ${{ steps.scan.outputs.base }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE" ]; then
+            jq --arg base "${BASE%/}" '
+              del(.runs[]?.originalUriBaseIds)
+              | (.runs[]?.results[]?.locations[]?.physicalLocation.artifactLocation) |=
+                  (del(.uriBaseId) | .uri |= (if $base == "." or test("^(/|[a-z]+:)") then . else $base + "/" + . end))' \
+              "$SARIF" > "$SARIF.rebased"
+            mv "$SARIF.rebased" "$SARIF"
+          fi
+          # shellcheck disable=SC2016 # $levels is a jq variable, not a shell one
+          filter='[.runs[]?.results[]? | select(($levels == "") or ((.level // "warning") as $l | $levels | split(" ") | index($l)))]'
+          count=$(jq --arg levels "$LEVELS" "$filter | length" "$SARIF")
+          echo "$count" > "$(dirname "$SARIF")/findings.txt"
+          # Render the rows to a file first, then head the file. Piping `jq | head`
+          # breaks under `set -o pipefail`: when there are >100 findings, head closes
+          # the pipe after 100 lines and jq dies with "writing output failed: Broken
+          # pipe", failing the whole job (seen on CodeQL with a large PR).
+          rows="$(dirname "$SARIF")/report-rows.md"; : > "$rows"
+          if [ "$count" -gt 0 ]; then
+            jq -r --arg levels "$LEVELS" "$filter"'[] | [(.level // "warning"), (.ruleId // "-"),
+                ((.locations[0].physicalLocation.artifactLocation.uri // "-") + ":" + ((.locations[0].physicalLocation.region.startLine // "") | tostring))]
+              | map(tostring | gsub("\\|"; "\\|")) | "| \(.[0]) | `\(.[1])` | `\(.[2])` |"' "$SARIF" > "$rows"
+          fi
+          {
+            echo "### $TOOL: $count finding(s)${LEVELS:+ (levels: $LEVELS)}"
+            if [ "$count" -gt 0 ]; then
+              echo
+              echo "| Level | Rule | Location |"
+              echo "|---|---|---|"
+              head -n 100 "$rows"
+              if [ "$count" -gt 100 ]; then echo "| | $((count - 100)) more in the reports artifact | |"; fi
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$count" -gt 0 ]; then
+            if [ "$ENFORCE" = true ]; then
+              echo "::error::$TOOL reported $count finding(s)"
+              exit 1
+            fi
+            echo "::warning::$TOOL reported $count finding(s). Warn-only: set enforce-security: true to block merges."
+          fi
+      # Private repositories need GitHub Advanced Security to accept SARIF, and a repo
+      # with CodeQL "default setup" switched on rejects advanced-setup CodeQL results.
+      # Neither should fail the build: the same SARIF is always in the reports artifact.
+      - name: Upload SARIF to code scanning
+        id: upload-sarif
+        if: always() && inputs.upload-sarif && steps.scan.outputs.sarif != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: ${{ inputs.artifact-prefix }}/${{ github.job }}
+      - name: Note a failed SARIF upload
+        if: always() && steps.upload-sarif.outcome == 'failure'
+        run: |
+          echo "::warning::SARIF upload to code scanning failed (no Advanced Security, CodeQL default setup enabled, or missing security-events: write). Results are still in the reports artifact."
+          echo "> SARIF upload to code scanning failed; results are in the reports artifact only." >> "$GITHUB_STEP_SUMMARY"
+      # Reports are staged under a directory named for the job, so every artifact
+      # unpacks to <job>/... . Downloaders then use merge-multiple and get the same
+      # layout whether one artifact matches or many; without merging, a single match
+      # is unpacked flat and the job name is lost.
+      - name: Stage reports
+        if: always()
+        env:
+          JOB: ${{ github.job }}
+        run: |
+          if [ -d "$RUNNER_TEMP/reports" ]; then
+            mkdir -p "$RUNNER_TEMP/upload/$JOB"
+            cp -R "$RUNNER_TEMP/reports/." "$RUNNER_TEMP/upload/$JOB/"
+          fi
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}.reports.${{ github.job }}
+          path: ${{ runner.temp }}/upload/
+          if-no-files-found: ignore
+          retention-days: 30
+
   summary:
     name: Summary
     if: always()
-    needs: [terraform, kubernetes, shell, semgrep, secrets, trivy, workflow-audit]
+    needs: [terraform, kubernetes, shell, semgrep, secrets, trivy, workflow-audit, codeql]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
       contents: read # check out the code
       pull-requests: write # post the sticky PR comment; capped by the caller's grant, so a caller that omits it just gets a 403-warn, not a failure
     env:
-      REQUIRED_REPORTS: terraform kubernetes shell semgrep secrets trivy workflow-audit
+      REQUIRED_REPORTS: terraform kubernetes shell semgrep secrets trivy workflow-audit codeql
     steps:
       # The one check a caller needs to mark as required. It fails when any job
       # failed, and when a scanner job "succeeded" without writing a report: that

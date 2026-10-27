@@ -115,6 +115,31 @@ overlap, so either can be switched off with `codeql: false` or `semgrep: false`.
    `lint: false` drops the style checks only; the ruff `S` (bandit) security lint keeps
    running, since it is SAST rather than a duplicate of your own linter.
 
+### CodeQL on an infra/deploy repo (CodeQL-only)
+
+`security-iac.yml` has a `codeql` job (on by default) that scans the
+`codeql-languages` you give it — `actions` by default, i.e. the repo's GitHub
+workflow files (Terraform/HCL has no CodeQL analyzer). To replace a repo's
+per-repo CodeQL (a `codeql.yml` workflow or default setup) with one scan owned by
+this suite, keep `codeql` on and turn the other jobs off:
+
+```yaml
+with:
+  codeql: true
+  upload-sarif: true     # send results to the Security tab (needs code scanning)
+  tflint: false
+  shellcheck: false
+  semgrep: false
+  gitleaks: false
+  trivy: false
+  workflow-audit: false
+```
+
+Then remove the repo's own CodeQL so it is not scanned twice. Leave `upload-sarif`
+at its default (`true`) only where code scanning is available (public repos, or
+private repos with GitHub Advanced Security); otherwise results stay in the
+reports artifact.
+
 ### Baselines: where each tool reads its ignores
 
 All paths are at the repo root (or in `working-directory` where noted):
