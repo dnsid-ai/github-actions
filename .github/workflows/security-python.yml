@@ -65,7 +65,8 @@ on:
         description: >-
           Run the lint job (formatters, go vet / type-check, golangci-lint / ruff /
           ESLint). Set false when the repository already runs these in its own CI, to
-          avoid doing the same work twice.
+          avoid doing the same work twice. In Python this drops the style checks only —
+          the ruff `S` (bandit) security lint still runs, since it is a SAST scanner.
         type: boolean
         default: true
       test:
@@ -153,7 +154,6 @@ permissions: {}
 
 jobs:
   lint:
-    if: ${{ inputs.lint }}
     name: Lint (ruff, mypy) and security lint (ruff S)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -237,6 +237,9 @@ jobs:
             .venv/bin/python -m pip install --quiet --disable-pip-version-check "${missing[@]}"
           fi
       - name: Lint
+        # Style lint (ruff check/format, mypy). The security lint (ruff S) below
+        # always runs: `lint: false` drops the duplicate style checks, not SAST.
+        if: ${{ inputs.lint }}
         env:
           WD: ${{ inputs.working-directory }}
           FORMAT_CHECK: ${{ inputs.format-check }}

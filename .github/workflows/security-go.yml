@@ -65,7 +65,8 @@ on:
         description: >-
           Run the lint job (formatters, go vet / type-check, golangci-lint / ruff /
           ESLint). Set false when the repository already runs these in its own CI, to
-          avoid doing the same work twice.
+          avoid doing the same work twice. In Python this drops the style checks only —
+          the ruff `S` (bandit) security lint still runs, since it is a SAST scanner.
         type: boolean
         default: true
       test:
