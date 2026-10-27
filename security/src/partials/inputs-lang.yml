@@ -1,3 +1,16 @@
+lint:
+  description: >-
+    Run the lint job (formatters, go vet / type-check, golangci-lint / ruff /
+    ESLint). Set false when the repository already runs these in its own CI, to
+    avoid doing the same work twice.
+  type: boolean
+  default: true
+test:
+  description: >-
+    Run the test job. Set false when the repository runs its own tests in its
+    own CI (note: this job is where coverage is produced for Sonar).
+  type: boolean
+  default: true
 codeql:
   description: Run CodeQL. Turn off if the repo uses CodeQL "default setup" instead.
   type: boolean

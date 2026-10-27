@@ -63,6 +63,7 @@ permissions: {}
 
 jobs:
   lint:
+    if: ${{ inputs.lint }}
     name: Lint (ruff, mypy) and security lint (ruff S)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -114,6 +115,7 @@ jobs:
       # @include upload-reports.yml
 
   test:
+    if: ${{ inputs.test }}
     name: Test (pytest)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30

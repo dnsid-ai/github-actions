@@ -104,6 +104,12 @@ overlap, so either can be switched off with `codeql: false` or `semgrep: false`.
 5. **CodeQL "default setup".** If it's turned on for the repo, either set
    `codeql: false`, or have an admin switch the repo to advanced setup. Otherwise the
    upload is rejected. The job still passes, and its results stay in the artifact.
+6. **Don't run what the repo already runs.** Every job is on by default, so a repo
+   adopting the suite fresh gets the whole set. If the repo's own CI already lints or
+   tests, switch off the duplicate here with `lint: false` and/or `test: false` (Go,
+   Python and TypeScript), the same way `codeql: false` hands CodeQL to default setup.
+   Turn off only the jobs another workflow already owns — and note `test: false` also
+   drops this suite's coverage report, so keep coverage running somewhere.
 
 ### Baselines: where each tool reads its ignores
 
