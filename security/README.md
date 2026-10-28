@@ -140,6 +140,33 @@ at its default (`true`) only where code scanning is available (public repos, or
 private repos with GitHub Advanced Security); otherwise results stay in the
 reports artifact.
 
+### CodeQL on Actions workflows in a Go/Python/TypeScript repo
+
+The language workflows scan their own language with `codeql`. To also scan the
+repo's GitHub Actions workflows — and retire a per-repo `codeql.yml` or CodeQL
+default setup that covered `actions` — set `codeql-actions: true`:
+
+```yaml
+with:
+  codeql-actions: true   # second CodeQL scan over .github/workflows, from repo root
+```
+
+It's a **separate job** (`SAST (CodeQL: actions)`) rather than another language
+in the `codeql` job because `actions` only supports build-mode `none`, which
+can't share one database with a compiled language's build (Go autobuild), and
+because it scans from the repo root — the `.github/workflows` a scan rooted at a
+`working-directory` subdir would miss. Then remove the repo's own CodeQL for
+Actions so it is not scanned twice.
+
+Its results reach the **Security tab** only where this upload is accepted — the
+same rule as the `codeql` job (step 5 above): default setup rejects advanced-setup
+uploads **for the whole repo, not per language**. So `codeql-actions` replaces
+default setup for Actions only once default setup is switched **off for the repo**
+(or the repo is on advanced setup). While default setup stays on for the repo's
+own language, turn `codeql-actions` on if you like, but its results stay in the
+reports artifact until default setup is disabled — don't disable only the `actions`
+language and expect the advanced upload to land.
+
 ### Baselines: where each tool reads its ignores
 
 All paths are at the repo root (or in `working-directory` where noted):

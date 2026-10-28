@@ -1,0 +1,37 @@
+# CodeQL for GitHub Actions workflows. A separate job from the language's own
+# CodeQL scan because `actions` only supports build-mode `none`, which can't
+# share one database with a compiled language's build (e.g. Go autobuild), and
+# because it must scan from the repo root — the `.github/workflows` a language
+# scan rooted at a `working-directory` subdir would miss. Opt in with
+# `codeql-actions: true` to retire a repo's own codeql.yml / CodeQL default
+# setup for Actions.
+codeql-actions:
+  name: "SAST (CodeQL: actions)"
+  if: ${{ (inputs.codeql-actions) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+  runs-on: ${{ inputs.runs-on }}
+  timeout-minutes: 45
+  permissions:
+    contents: read # check out the code
+    security-events: write # upload SARIF to code scanning
+    actions: read # code scanning reads run metadata on private repos
+  steps:
+    # @include checkout.yml
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+      with:
+        languages: actions
+        # `actions` is interpreted — no build step.
+        build-mode: none
+        # No source-root: scan the repo-root .github/workflows, which a
+        # working-directory subdir would hide.
+        queries: ${{ inputs.codeql-queries }}
+    - name: Analyze
+      uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+      with:
+        category: ${{ inputs.artifact-prefix }}/codeql-actions
+        upload: never
+        output: ${{ runner.temp }}/codeql
+    # @include codeql-collect.yml
+    # @include report-sarif.yml
+    # @include upload-sarif.yml
+    # @include upload-reports.yml
