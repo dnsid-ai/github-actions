@@ -257,16 +257,18 @@ jobs:
   # @include jobs-shared-supply-chain.yml
   # @include job-sonar.yml
 
+  # @include codeql-actions-job.yml
+
   summary:
     name: Summary
     if: always()
-    needs: [lint, test, deps, codeql, semgrep, secrets, trivy, workflow-audit, dependency-review, sbom, sonar]
+    needs: [lint, test, deps, codeql, codeql-actions, semgrep, secrets, trivy, workflow-audit, dependency-review, sbom, sonar]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
       contents: read # check out the code
       pull-requests: write # post the sticky PR comment; capped by the caller's grant, so a caller that omits it just gets a 403-warn, not a failure
     env:
-      REQUIRED_REPORTS: deps codeql semgrep secrets trivy workflow-audit
+      REQUIRED_REPORTS: deps codeql codeql-actions semgrep secrets trivy workflow-audit
     steps:
       # @include summary-steps.yml

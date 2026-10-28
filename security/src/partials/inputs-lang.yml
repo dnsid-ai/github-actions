@@ -16,6 +16,14 @@ codeql:
   description: Run CodeQL. Turn off if the repo uses CodeQL "default setup" instead.
   type: boolean
   default: true
+codeql-actions:
+  description: >-
+    Run a second CodeQL scan over the repo's GitHub Actions workflows
+    (`.github/workflows`), from the repo root. Turn on to retire a repo's own
+    codeql.yml or CodeQL default setup for Actions. Separate from `codeql`
+    because Actions needs build-mode `none` and a repo-root source.
+  type: boolean
+  default: false
 codeql-queries:
   description: CodeQL query suite (security-extended or security-and-quality).
   type: string
