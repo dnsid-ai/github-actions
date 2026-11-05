@@ -2,7 +2,11 @@
   uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
   with:
     go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
-    cache: false
+    cache: true
+    # Include nested modules and modules without a go.sum (standard-library-only fixtures).
+    cache-dependency-path: |
+      ${{ inputs.working-directory }}/**/go.mod
+      ${{ inputs.working-directory }}/**/go.sum
 - name: Configure private modules
   if: inputs.go-private != ''
   env:
