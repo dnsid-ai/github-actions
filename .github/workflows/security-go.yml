@@ -635,8 +635,24 @@ jobs:
           cd "$WD"
           for mod in $MODULES; do
             name=$(printf '%s' "$mod" | tr -c 'A-Za-z0-9' '_')
-            # -no-fail: exit 0 even with findings; report-sarif.yml decides enforcement.
-            (cd "$mod" && "$RUNNER_TEMP/bin/gosec" -quiet -no-fail -fmt sarif -out "$RUNNER_TEMP/gosec/$name.sarif" ./...)
+            sarif="$RUNNER_TEMP/gosec/$name.sarif"
+            log="$RUNNER_TEMP/gosec/$name.log"
+            # -no-fail: exit 0 even with findings; report-sarif.yml decides
+            # enforcement. But -no-fail does NOT cover package load/build errors:
+            # on those gosec can exit 0 having written no SARIF, which previously
+            # slipped through to the jq merge below and failed with an opaque
+            # "no such file: *.sarif". Capture gosec's output and treat a
+            # non-zero exit OR a missing/invalid SARIF as a hard failure, printing
+            # gosec's own diagnostics so the cause is visible. A clean scan writes
+            # a valid SARIF with results:[] (~1KB, not an empty/absent file), so
+            # the guard checks SARIF structure, not emptiness.
+            rc=0
+            (cd "$mod" && "$RUNNER_TEMP/bin/gosec" -no-fail -fmt sarif -out "$sarif" ./...) >"$log" 2>&1 || rc=$?
+            if [ "$rc" -ne 0 ] || ! jq -e '.runs[0].tool.driver.name' "$sarif" >/dev/null 2>&1; then
+              echo "::error::gosec did not produce a valid SARIF for module '$mod' (exit $rc). Its output:"
+              cat "$log" || true
+              exit 1
+            fi
           done
           # One run per upload: code scanning rejects several runs of one tool in a file.
           jq -s 'reduce .[] as $d (null;
