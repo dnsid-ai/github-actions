@@ -248,15 +248,17 @@ jobs:
             name=$(printf '%s' "$mod" | tr -c 'A-Za-z0-9' '_')
             sarif="$RUNNER_TEMP/gosec/$name.sarif"
             log="$RUNNER_TEMP/gosec/$name.log"
-            # -no-fail: exit 0 even with findings; report-sarif.yml decides
-            # enforcement. But -no-fail does NOT cover package load/build errors:
-            # on those gosec can exit 0 having written no SARIF, which previously
-            # slipped through to the jq merge below and failed with an opaque
-            # "no such file: *.sarif". Capture gosec's output and treat a
-            # non-zero exit OR a missing/invalid SARIF as a hard failure, printing
-            # gosec's own diagnostics so the cause is visible. A clean scan writes
-            # a valid SARIF with results:[] (~1KB, not an empty/absent file), so
-            # the guard checks SARIF structure, not emptiness.
+            # Do NOT pass gosec's -quiet here: -quiet means "only output when
+            # issues are found", so a zero-findings scan (the common case) writes
+            # NO -out SARIF at all, which left the jq merge below with an empty
+            # glob and the opaque "no such file: *.sarif". -no-fail keeps findings
+            # from failing this step (report-sarif.yml decides enforcement) but
+            # does not cover package load/build errors, which exit non-zero.
+            # Capture gosec's output and treat a non-zero exit OR a missing/
+            # invalid SARIF as a hard failure, printing gosec's own diagnostics.
+            # A clean scan still writes a valid SARIF with results:[] (~1KB, not
+            # an empty/absent file), so the guard checks SARIF structure, not
+            # emptiness.
             rc=0
             (cd "$mod" && "$RUNNER_TEMP/bin/gosec" -no-fail -fmt sarif -out "$sarif" ./...) >"$log" 2>&1 || rc=$?
             if [ "$rc" -ne 0 ] || ! jq -e '.runs[0].tool.driver.name' "$sarif" >/dev/null 2>&1; then
