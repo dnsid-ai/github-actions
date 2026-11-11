@@ -17,57 +17,67 @@ Every workflow ends in a **Summary** job, which:
 
 - fails if any job failed;
 - fails if a scanner job "succeeded" without writing a report (a gate that is green over nothing);
-- **fails on a push that wasn't scanned** — the security scans don't re-run on every push (see below), so this keeps an unscanned commit from merging green;
+- fails if a required scan was skipped, or if selection failed; intentional skips include a reason;
 - writes one table of results and findings to the run page;
 - publishes every report, bundled, as the `<prefix>.sonar-reports` artifact.
 
 ### When the scans run
 
-The scan jobs run when a PR is **opened or reopened** (and on any non-`pull_request`
-trigger the caller uses, e.g. push to a branch or schedule). They **do not re-run
-on every push to an open PR** — that would re-run CodeQL, Trivy, Semgrep and the
-rest on each commit for no added signal.
+Go, Python, TypeScript, IaC and container workflows select scans on **every PR
+update**, using the complete merge-base-to-PR-head diff, including deletions and
+both sides of renames. The selector is embedded in the pinned reusable workflow;
+it never executes selector code from the caller's checkout.
 
-What keeps running on every push depends on the workflow:
+Selection is deliberately conservative:
 
-- **go / python / typescript** — `lint` and `test` run on every push (unless
-  turned off with `lint: false` / `test: false`); the scanners (dependency
-  checks, CodeQL, Semgrep, gitleaks, Trivy, zizmor, SBOM, dependency review,
-  Sonar) are throttled. In Python the ruff `S` security lint runs regardless of
-  `lint`.
-- **iac** — the fast checks run on every push: `tflint`, `shellcheck`, and
-  `kube-linter` + conftest (including the `*_test.rego` policy tests); the
-  scanners shared with the other workflows (Semgrep, gitleaks, Trivy, zizmor,
-  CodeQL, Sonar) are throttled.
-- **container** — scan-only. Its one job builds the image and scans it, so on a
-  `synchronize` push it skips entirely and re-runs on open/reopen (or with the
-  label). There is no separate build-only check.
-- **dast** — triggered on dispatch/schedule, so none of this applies.
+- **Lint/tests and fast IaC checks** keep their existing every-push behaviour and
+  caller switches. Python's ruff `S` security lint still runs with `lint: false`.
+- **gitleaks** scans full reachable history on every PR update, including docs-only
+  changes, unless the caller explicitly disables it.
+- **Documentation-only PRs** can skip project scans. Only Markdown, reStructuredText
+  and text under `docs/`, plus conventional root documentation files (README,
+  CHANGELOG, CONTRIBUTING, LICENSE, AUTHORS, CODE_OF_CONDUCT, SECURITY), qualify.
+  Other paths, including unknown file types, select project scans. This assumes
+  those documentation files are not executable/build inputs; callers that use them
+  that way should set `scan-every-push: true`.
+- **Configuration and workflows** select project scans and workflow audits.
+  Ordinary source changes skip zizmor and Actions-only CodeQL. Custom IaC CodeQL
+  language sets conservatively follow project changes.
+- **Dependencies:** Go's reachability-sensitive govulncheck and Python's potentially
+  dynamic package metadata follow project changes. TypeScript's lockfile-only
+  osv-scanner skips source-only changes; lockfile/manifests/configuration changes
+  select it. SBOM and dependency review conservatively follow project changes.
+- **Custom Semgrep rules**, local or non-default registry rulesets, run on every
+  PR update, including their rule tests: their input scope cannot be inferred.
+- **Container scans** consider every file in the build context (including docs),
+  the Dockerfile and configuration. Unknown/remote contexts always scan. Files
+  outside the context and Dockerfile can skip the image job.
+- **Missing or empty diffs** select all enabled scans. Selection failures, missing
+  decisions, required-but-skipped scans and successful scanners without reports
+  fail Summary. Intentional skips publish their reasons.
 
-Custom Semgrep rules run inside the (throttled) Semgrep job, so their
-`tests/semgrep/` tests run on open/reopen, not on every push.
+Non-PR events (push, schedule, dispatch) run all enabled scans. Keep a default-branch
+push trigger and add a regular scheduled full scan in callers: vulnerability feeds
+and remote rules change even when source files do not. This library does not add
+caller schedules automatically.
 
-So the gate stays honest, the **Summary** check **fails on a push that wasn't
-scanned** (it does not go green over an unscanned commit). A commit cannot be
-merged until it has been scanned.
+`scan-every-push: true` bypasses selection and forces all enabled scans. The
+`rerun-security` PR label does the same on the next triggered run (push/reopen);
+adding the label alone does not trigger the default caller templates.
 
-To scan the current commit — e.g. before merging after a round of pushes — add
-the **`rerun-security`** label to the PR and push again (or reopen the PR); the
-whole suite runs and Summary goes green. Removing the label returns to the
-open-only behaviour.
+DAST keeps its existing event gate and is intended for dispatch/schedule, not PR
+path selection. No scan results are reused across commits.
 
-A caller that genuinely wants every commit scanned can set **`scan-every-push:
-true`**. Then the scans run on every push and the Summary never fails for an
-unscanned commit. This is for callers whose whole purpose is to run the scanners
-— this repo's own `security-self-test` sets it — not for ordinary consumers,
-who get cheaper, open-only scanning by leaving it at its `false` default.
+### Dependency caching
 
-**Heads-up for Dependabot and "Update branch".** Both push to the PR head, which
-fires `synchronize`. On a PR without the `rerun-security` label the Summary check
-then goes red until the current commit is scanned — add the label and push again,
-or reopen the PR. In a repo that requires branches to be up to date, or that
-auto-merges Dependabot PRs, expect a base-branch update to stall the PR this way;
-set `scan-every-push: true` if that trade-off isn't worth it for your repo.
+Go already caches module downloads and build products through setup-go. Node
+caches the npm/pnpm download store using the project's lockfile; Python caches pip
+downloads using package metadata/requirements and uv's cache using uv.lock and
+pyproject.toml. The setup actions scope caches to their runtime/platform as
+applicable. Installs still run with the existing locked/frozen and lifecycle-script
+restrictions; node_modules, project virtualenvs and scanner pass/fail results are
+not cached. Scanner tools, vulnerability databases and Docker layers are outside
+this change.
 
 ## What the tools are
 
@@ -121,11 +131,11 @@ overlap, so either can be switched off with `codeql: false` or `semgrep: false`.
 `codeql-languages` you give it — `actions` by default, i.e. the repo's GitHub
 workflow files (Terraform/HCL has no CodeQL analyzer). To replace a repo's
 per-repo CodeQL (a `codeql.yml` workflow or default setup) with one scan owned by
-this suite, keep `codeql` on and turn the other jobs off:
+this suite, turn `codeql` on and the other jobs off:
 
 ```yaml
 with:
-  codeql: true
+  codeql: true          # scans codeql-languages (default: actions)
   upload-sarif: true     # send results to the Security tab (needs code scanning)
   tflint: false
   shellcheck: false

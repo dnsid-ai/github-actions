@@ -77,6 +77,12 @@ on:
 permissions: {}
 
 jobs:
+  selection:
+    name: Select checks
+    env:
+      KIND: iac
+    # @include selection-job.yml
+
   terraform:
     name: Terraform lint (tflint)
     if: ${{ inputs.tflint }}
@@ -237,7 +243,8 @@ jobs:
 
   codeql:
     name: SAST (CodeQL)
-    if: ${{ (inputs.codeql) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['codeql'].run }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
     permissions:
@@ -269,7 +276,7 @@ jobs:
   summary:
     name: Summary
     if: always()
-    needs: [terraform, kubernetes, shell, semgrep, secrets, trivy, workflow-audit, codeql]
+    needs: [selection, terraform, kubernetes, shell, semgrep, secrets, trivy, workflow-audit, codeql]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:

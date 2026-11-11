@@ -3,14 +3,10 @@
 # would be a gate that is green over nothing. The job needs `env.REQUIRED_REPORTS`,
 # the space-separated ids of jobs that must leave a report whenever they run.
 #
-# It also fails when the scans were skipped for this commit. The scan jobs do
-# not re-run on every push to an open PR (they run on open or reopen, or when
-# the `rerun-security` label is present); without this, the required check would
-# go green over an unscanned commit, so unscanned code could merge. Failing here
-# keeps the gate honest: a pushed-but-unscanned commit cannot be merged until it
-# is scanned.
+# Selection-aware workflows allow only skips explicitly approved by the plan.
+# DAST retains its event-based gate (it normally runs on dispatch/schedule).
 - name: Require a scan of the current commit
-  if: ${{ !inputs.scan-every-push && github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+  if: ${{ fromJSON(toJSON(needs)).selection.result == '' && !inputs.scan-every-push && github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
   env:
     PREFIX: ${{ inputs.artifact-prefix }}
   run: |
@@ -40,6 +36,7 @@
     NEEDS: ${{ toJSON(needs) }}
     PREFIX: ${{ inputs.artifact-prefix }}
     ENFORCE: ${{ inputs.enforce-security }}
+    PLAN: ${{ fromJSON(toJSON(needs)).selection.outputs.plan || '{}' }}
   run: |
     set -euo pipefail
     all="$RUNNER_TEMP/all"; mkdir -p "$all"
@@ -49,6 +46,12 @@
     md="$RUNNER_TEMP/summary.md"
     run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
     fail=0
+    if jq -e 'has("selection")' <<<"$NEEDS" > /dev/null; then
+      if [ "$(jq -r '.selection.result' <<<"$NEEDS")" != success ] || ! jq -e 'type == "object" and length > 0' <<<"$PLAN" > /dev/null; then
+        echo "::error::Check selection did not complete successfully"
+        fail=1
+      fi
+    fi
     {
       echo "<!-- security-summary:$PREFIX -->"
       echo "## $PREFIX: summary"
@@ -66,6 +69,19 @@
       result=$(jq -r --arg j "$job" '.[$j].result' <<<"$NEEDS")
       dir="$all/$job"
       files="-"; findings="-"
+      if [ "$job" != selection ] && jq -e 'has("selection")' <<<"$NEEDS" > /dev/null; then
+        decision=$(jq -r --arg j "$job" '.[$j].run // false' <<<"$PLAN")
+        if ! jq -e --arg j "$job" '.[$j].run | type == "boolean"' <<<"$PLAN" > /dev/null; then
+          echo "::error::No selection decision for $job"
+          fail=1
+        elif [ "$result" = skipped ] && [ "$decision" = true ]; then
+          result="skipped, but REQUIRED by selection"
+          fail=1
+        elif [ "$result" = skipped ]; then
+          reason=$(jq -r --arg j "$job" '.[$j].reason' <<<"$PLAN")
+          result="skipped ($reason)"
+        fi
+      fi
       if [ -d "$dir" ] && [ -n "$(find "$dir" -type f -print -quit)" ]; then
         files=$(find "$dir" -type f ! -name findings.txt -printf '%f\n' | sort | paste -sd' ' -)
         if [ -f "$dir/findings.txt" ]; then findings=$(cat "$dir/findings.txt"); fi

@@ -73,6 +73,12 @@ on:
 permissions: {}
 
 jobs:
+  selection:
+    name: Select checks
+    env:
+      KIND: go
+    # @include selection-job.yml
+
   lint:
     if: ${{ inputs.lint }}
     name: Lint (gofmt, go vet, golangci-lint)
@@ -170,7 +176,8 @@ jobs:
       # @include upload-reports.yml
 
   deps:
-    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['deps'].run }}
     name: Dependency vulnerabilities (govulncheck)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -219,7 +226,8 @@ jobs:
       # @include upload-reports.yml
 
   gosec:
-    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['gosec'].run }}
     name: SAST (gosec)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -283,7 +291,8 @@ jobs:
 
   codeql:
     name: SAST (CodeQL)
-    if: ${{ (inputs.codeql) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['codeql'].run }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
     permissions:
@@ -320,7 +329,7 @@ jobs:
   summary:
     name: Summary
     if: always()
-    needs: [lint, test, deps, gosec, codeql, codeql-actions, semgrep, secrets, trivy, workflow-audit, dependency-review, sbom, sonar]
+    needs: [selection, lint, test, deps, gosec, codeql, codeql-actions, semgrep, secrets, trivy, workflow-audit, dependency-review, sbom, sonar]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:

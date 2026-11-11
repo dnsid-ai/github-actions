@@ -13,6 +13,10 @@
     node-version: ${{ inputs.node-version-file == '' && inputs.node-version || '' }}
     node-version-file: ${{ inputs.node-version-file != '' && format('{0}/{1}', inputs.working-directory, inputs.node-version-file) || '' }}
     package-manager-cache: false
+    cache: ${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.working-directory)) != '' && 'pnpm' || 'npm' }}
+    cache-dependency-path: |
+      ${{ inputs.working-directory }}/pnpm-lock.yaml
+      ${{ inputs.working-directory }}/package-lock.json
 - name: Install dependencies
   id: env
   env:

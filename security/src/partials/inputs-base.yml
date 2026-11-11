@@ -15,11 +15,10 @@ enforce-security:
   default: false
 scan-every-push:
   description: >-
-    Run the security scans on every pushed commit, not only on PR open/reopen.
-    Off by default: scans run on open/reopen (or when the 'rerun-security' label
-    is present), and the Summary check fails on any pushed-but-unscanned commit.
-    Set true for callers that genuinely want every commit scanned — for example
-    this repo's own security-self-test, which exists to run the scanners.
+    Force all enabled scans on every commit, bypassing PR change selection.
+    By default PRs select scans conservatively from their merge-base diff;
+    non-PR events always run all enabled scans. The 'rerun-security' label
+    also forces all scans. DAST retains open/reopen-only PR scanning.
   type: boolean
   default: false
 upload-sarif:
