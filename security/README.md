@@ -72,8 +72,8 @@ path selection. No scan results are reused across commits.
 
 Go already caches module downloads and build products through setup-go. Node
 caches the npm/pnpm download store using the project's lockfile; Python caches pip
-downloads using package metadata/requirements and uv's cache using uv.lock and
-pyproject.toml. The setup actions scope caches to their runtime/platform as
+downloads for non-uv projects using package metadata/requirements, or uv's cache
+using uv.lock and pyproject.toml. The setup actions scope caches to their runtime/platform as
 applicable. Installs still run with the existing locked/frozen and lifecycle-script
 restrictions; node_modules, project virtualenvs and scanner pass/fail results are
 not cached. Scanner tools, vulnerability databases and Docker layers are outside

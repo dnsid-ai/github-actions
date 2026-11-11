@@ -62,6 +62,24 @@ class SelectionTests(unittest.TestCase):
         self.assertFalse(p["kubernetes"]["run"])
         self.assertTrue(self.plan(["README.md"], kind="iac", **{"manifests-command": "render"})["kubernetes"]["run"])
 
+    def test_iac_codeql_actions_only_and_custom_languages(self):
+        for path in ("main.tf", "src/main.py"):
+            self.assertFalse(self.plan([path], kind="iac")["codeql"]["run"])
+            self.assertTrue(self.plan([path], kind="iac", **{"codeql-languages": "python"})["codeql"]["run"])
+        self.assertTrue(self.plan([".github/workflows/ci.yml"], kind="iac")["codeql"]["run"])
+
+    def test_python_caches_match_installer(self):
+        setup = (ROOT / "security/src/partials/setup-python-project.yml").read_text()
+        pip = next(line for line in setup.splitlines() if line.startswith("    cache:"))
+        self.assertIn("hashFiles(format('{0}/uv.lock', inputs.working-directory)) == '' &&", pip)
+        self.assertIn("enable-cache: true", setup)
+
+    def test_caller_templates_have_distinct_concurrency_groups(self):
+        groups = []
+        for template in (ROOT / "security/templates/callers").glob("*.yml"):
+            groups.extend(line.strip() for line in template.read_text().splitlines() if line.startswith("  group:"))
+        self.assertEqual(len(groups), len(set(groups)))
+
     def test_container_includes_documents_in_context(self):
         opts = {"context": "app", "dockerfile": "docker/Dockerfile"}
         for path in ("app/README.md", "docker/Dockerfile", "app/.dockerignore"):
