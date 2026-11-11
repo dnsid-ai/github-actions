@@ -30,11 +30,10 @@ on:
         default: false
       scan-every-push:
         description: >-
-          Run the security scans on every pushed commit, not only on PR open/reopen.
-          Off by default: scans run on open/reopen (or when the 'rerun-security' label
-          is present), and the Summary check fails on any pushed-but-unscanned commit.
-          Set true for callers that genuinely want every commit scanned — for example
-          this repo's own security-self-test, which exists to run the scanners.
+          Force all enabled scans on every commit, bypassing PR change selection.
+          By default PRs select scans conservatively from their merge-base diff;
+          non-PR events always run all enabled scans. The 'rerun-security' label
+          also forces all scans. DAST retains open/reopen-only PR scanning.
         type: boolean
         default: false
       upload-sarif:
@@ -161,6 +160,171 @@ on:
 permissions: {}
 
 jobs:
+  selection:
+    name: Select checks
+    env:
+      KIND: python
+    # Caller supplies the job's KIND environment variable; code below is generated
+    # from this trusted workflow release, not executed from the caller's checkout.
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      plan: ${{ steps.select.outputs.plan }}
+    steps:
+      - name: Check out commit graph for PR selection
+        if: ${{ github.event_name == 'pull_request' && !inputs.scan-every-push && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
+      - name: Select checks
+        id: select
+        env:
+          INPUTS: ${{ toJSON(inputs) }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          FORCE: ${{ inputs.scan-every-push || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+        run: |
+          python3 -I - <<'PY'
+          """Conservative PR selection; embedded into workflows, never loaded from caller code."""
+          import json
+          import os
+          from pathlib import PurePosixPath
+          import subprocess
+
+
+          def changed_paths(base, head, cwd=None):
+              try:
+                  # --no-renames retains both the deleted and added path of a rename.
+                  diff = subprocess.check_output(
+                      ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}", "--"],
+                      cwd=cwd, stderr=subprocess.PIPE,
+                  )
+                  return diff.decode("utf-8").rstrip("\0").split("\0") if diff else []
+              except (subprocess.CalledProcessError, UnicodeError, OSError):
+                  return None
+
+
+          def documentation(path):
+              p = PurePosixPath(path)
+              return (
+                  p.suffix.lower() in {".md", ".rst", ".txt"}
+                  and (path.startswith("docs/") or (len(p.parts) == 1 and p.stem.upper() in {
+                      "README", "CHANGELOG", "CONTRIBUTING", "LICENSE", "AUTHORS", "CODE_OF_CONDUCT", "SECURITY",
+                  }))
+              )
+
+
+          def configuration(path):
+              p = PurePosixPath(path)
+              # Configuration and local actions can change scanner inputs or execution.
+              return (path.startswith(".github/") or p.name.startswith(".")
+                      or p.name in {"action.yml", "action.yaml", "go.mod", "go.sum", "go.work", "go.work.sum", "Pipfile"}
+                      or "requirements" in p.name.lower()
+                      or p.suffix in {".toml", ".json", ".yaml", ".yml", ".ini", ".cfg", ".lock"})
+
+
+          def plan(kind, inputs, paths):
+              full = paths is None or not paths or inputs.get("scan-every-push", False)
+              config = full or any(configuration(p) for p in paths)
+              project = full or config or any(not documentation(p) for p in paths)
+              enabled = {
+                  "lint": kind == "python" or inputs.get("lint", True),
+                  "test": inputs.get("test", True),
+                  "deps": True,
+                  "gosec": True,
+                  "codeql": inputs.get("codeql", True),
+                  "codeql-actions": inputs.get("codeql-actions", False),
+                  "semgrep": inputs.get("semgrep", True),
+                  "secrets": inputs.get("gitleaks", True),
+                  "trivy": inputs.get("trivy", True),
+                  "workflow-audit": inputs.get("workflow-audit", True),
+                  "dependency-review": inputs.get("dependency-review", True),
+                  "sbom": inputs.get("sbom", False),
+                  "sonar": bool(inputs.get("sonar-host-url", "")),
+                  "terraform": inputs.get("tflint", True),
+                  "kubernetes": bool(inputs.get("manifests-command", "") or inputs.get("manifests-path", "")),
+                  "shell": inputs.get("shellcheck", True),
+                  "image": True,
+              }
+              affected = {job: project for job in enabled}
+              for job in ("lint", "test", "terraform", "kubernetes", "shell", "secrets"):
+                  affected[job] = True  # Preserve fast feedback and full-history secret coverage.
+              affected["workflow-audit"] = affected["codeql-actions"] = config
+              if kind == "typescript":
+                  # osv-scanner consumes only the lockfile; source changes cannot alter its packages.
+                  affected["deps"] = config
+              if kind == "iac":
+                  affected["codeql"] = config if inputs.get("codeql-languages", "actions") == "actions" else project
+              if kind == "container":
+                  context = PurePosixPath(inputs.get("context", "."))
+                  dockerfile = PurePosixPath(inputs.get("dockerfile", "Dockerfile"))
+                  # Remote/out-of-tree contexts cannot be safely classified from a repo diff.
+                  unknown_context = ":" in str(context) or context.is_absolute() or ".." in context.parts
+                  affected["image"] = full or config or unknown_context or any(
+                      PurePosixPath(p) == dockerfile or PurePosixPath(p).is_relative_to(context) for p in paths
+                  )
+              jobs = {
+                  "go": "lint test deps gosec codeql codeql-actions semgrep secrets trivy workflow-audit dependency-review sbom sonar",
+                  "python": "lint test deps codeql codeql-actions semgrep secrets trivy workflow-audit dependency-review sbom sonar",
+                  "typescript": "lint test deps codeql codeql-actions semgrep secrets trivy workflow-audit dependency-review sbom sonar",
+                  "iac": "terraform kubernetes shell codeql semgrep secrets trivy workflow-audit",
+                  "container": "image",
+              }[kind].split()
+              result = {}
+              for job in jobs:
+                  run = enabled[job] and affected[job]
+                  reason = ("disabled by caller" if not enabled[job] else
+                            "full scan (forced, non-PR, empty or unavailable diff)" if full else
+                            "required for changed inputs or every-push coverage" if run else
+                            "not applicable to changed paths")
+                  result[job] = {"run": run, "reason": reason}
+              return result
+
+
+          def main():
+              inputs = json.loads(os.environ["INPUTS"])
+              paths = None
+              if os.environ["EVENT"] == "pull_request" and os.environ["FORCE"] != "true":
+                  paths = changed_paths(os.environ["BASE"], os.environ["HEAD"])
+              selected = plan(os.environ["KIND"], inputs, paths)
+              if os.environ["KIND"] == "container":
+                  context = inputs.get("context", ".")
+                  if os.path.realpath(context) != os.path.abspath(context):
+                      selected["image"] = {"run": True, "reason": "symlinked build context has unknown input scope"}
+              # Custom rules may deliberately scan documentation; never infer their scope.
+              if "semgrep" in selected and inputs.get("semgrep", True):
+                  wd = inputs.get("working-directory", ".")
+                  rules = inputs.get("semgrep-rules", "")
+                  defaults = {
+                      "go": "p/golang p/gosec p/secrets",
+                      "python": "p/python p/secrets",
+                      "typescript": "p/typescript p/javascript p/nodejsscan p/secrets",
+                      "iac": "p/terraform p/kubernetes p/dockerfile p/secrets",
+                  }
+                  if os.path.isdir(os.path.join(wd, ".semgrep")) or rules != defaults[os.environ["KIND"]]:
+                      selected["semgrep"] = {"run": True, "reason": "custom Semgrep rules have unknown input scope"}
+              # Dependency review only exists on PRs, even during a full scan.
+              if "dependency-review" in selected and os.environ["EVENT"] != "pull_request":
+                  selected["dependency-review"] = {"run": False, "reason": "not a pull request"}
+              with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                  output.write("plan=" + json.dumps(selected, separators=(",", ":")) + "\n")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                  summary.write("### Scan selection\n\n")
+                  summary.write("Unavailable or empty diffs run conservatively; secrets retain full-history coverage.\n\n")
+                  summary.write("| Check | Run | Reason |\n|---|---|---|\n")
+                  for job, decision in selected.items():
+                      summary.write(f"| {job} | {decision['run']} | {decision['reason']} |\n")
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+
   lint:
     name: Lint (ruff, mypy) and security lint (ruff S)
     runs-on: ${{ inputs.runs-on }}
@@ -184,12 +348,21 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
+          cache: ${{ hashFiles(format('{0}/uv.lock', inputs.working-directory)) == '' && hashFiles(format('{0}/pyproject.toml', inputs.working-directory), format('{0}/setup.py', inputs.working-directory), format('{0}/setup.cfg', inputs.working-directory), format('{0}/**/*requirements*.txt', inputs.working-directory)) != '' && 'pip' || '' }}
+          cache-dependency-path: |
+            ${{ inputs.working-directory }}/pyproject.toml
+            ${{ inputs.working-directory }}/setup.py
+            ${{ inputs.working-directory }}/setup.cfg
+            ${{ inputs.working-directory }}/**/*requirements*.txt
       - name: Set up uv
         if: hashFiles(format('{0}/uv.lock', inputs.working-directory)) != ''
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ inputs.uv-version }}
-          enable-cache: false
+          enable-cache: true
+          cache-dependency-glob: |
+            ${{ inputs.working-directory }}/uv.lock
+            ${{ inputs.working-directory }}/pyproject.toml
       - name: Install project
         id: env
         env:
@@ -397,12 +570,21 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
+          cache: ${{ hashFiles(format('{0}/uv.lock', inputs.working-directory)) == '' && hashFiles(format('{0}/pyproject.toml', inputs.working-directory), format('{0}/setup.py', inputs.working-directory), format('{0}/setup.cfg', inputs.working-directory), format('{0}/**/*requirements*.txt', inputs.working-directory)) != '' && 'pip' || '' }}
+          cache-dependency-path: |
+            ${{ inputs.working-directory }}/pyproject.toml
+            ${{ inputs.working-directory }}/setup.py
+            ${{ inputs.working-directory }}/setup.cfg
+            ${{ inputs.working-directory }}/**/*requirements*.txt
       - name: Set up uv
         if: hashFiles(format('{0}/uv.lock', inputs.working-directory)) != ''
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ inputs.uv-version }}
-          enable-cache: false
+          enable-cache: true
+          cache-dependency-glob: |
+            ${{ inputs.working-directory }}/uv.lock
+            ${{ inputs.working-directory }}/pyproject.toml
       - name: Install project
         id: env
         env:
@@ -510,7 +692,8 @@ jobs:
           retention-days: 30
 
   deps:
-    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['deps'].run }}
     name: Dependency vulnerabilities (pip-audit)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
@@ -531,12 +714,21 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
+          cache: ${{ hashFiles(format('{0}/uv.lock', inputs.working-directory)) == '' && hashFiles(format('{0}/pyproject.toml', inputs.working-directory), format('{0}/setup.py', inputs.working-directory), format('{0}/setup.cfg', inputs.working-directory), format('{0}/**/*requirements*.txt', inputs.working-directory)) != '' && 'pip' || '' }}
+          cache-dependency-path: |
+            ${{ inputs.working-directory }}/pyproject.toml
+            ${{ inputs.working-directory }}/setup.py
+            ${{ inputs.working-directory }}/setup.cfg
+            ${{ inputs.working-directory }}/**/*requirements*.txt
       - name: Set up uv
         if: hashFiles(format('{0}/uv.lock', inputs.working-directory)) != ''
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ inputs.uv-version }}
-          enable-cache: false
+          enable-cache: true
+          cache-dependency-glob: |
+            ${{ inputs.working-directory }}/uv.lock
+            ${{ inputs.working-directory }}/pyproject.toml
       - name: Install project
         id: env
         env:
@@ -736,7 +928,8 @@ jobs:
 
   codeql:
     name: SAST (CodeQL)
-    if: ${{ (inputs.codeql) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['codeql'].run }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
     permissions:
@@ -878,7 +1071,8 @@ jobs:
 
   semgrep:
     name: SAST (Semgrep)
-    if: ${{ (inputs.semgrep) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['semgrep'].run }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -1032,7 +1226,8 @@ jobs:
 
   secrets:
     name: Secrets (gitleaks)
-    if: ${{ (inputs.gitleaks) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['secrets'].run }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
@@ -1170,7 +1365,8 @@ jobs:
 
   trivy:
     name: Vulnerabilities, misconfig and secrets (Trivy)
-    if: ${{ (inputs.trivy) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['trivy'].run }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -1312,7 +1508,8 @@ jobs:
 
   workflow-audit:
     name: Workflow security (zizmor)
-    if: ${{ (inputs.workflow-audit) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['workflow-audit'].run }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
@@ -1459,7 +1656,8 @@ jobs:
           retention-days: 30
   dependency-review:
     name: Dependency review
-    if: ${{ (inputs.dependency-review && github.event_name == 'pull_request') && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['dependency-review'].run }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
@@ -1529,7 +1727,8 @@ jobs:
 
   sbom:
     name: SBOM (Syft)
-    if: ${{ (inputs.sbom) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['sbom'].run }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
@@ -1574,8 +1773,8 @@ jobs:
   # summary job publishes the same reports as the <prefix>.sonar-reports artifact.
   sonar:
     name: SonarQube
-    if: ${{ (always() && inputs.sonar-host-url != '') && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
-    needs: [lint, test, deps, semgrep, secrets, trivy, workflow-audit]
+    if: ${{ always() && !cancelled() && needs.selection.result == 'success' && fromJSON(needs.selection.outputs.plan)['sonar'].run }}
+    needs: [selection, lint, test, deps, semgrep, secrets, trivy, workflow-audit]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
     permissions:
@@ -1626,7 +1825,8 @@ jobs:
   # setup for Actions.
   codeql-actions:
     name: "SAST (CodeQL: actions)"
-    if: ${{ (inputs.codeql-actions) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['codeql-actions'].run }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
     permissions:
@@ -1768,7 +1968,7 @@ jobs:
   summary:
     name: Summary
     if: always()
-    needs: [lint, test, deps, codeql, codeql-actions, semgrep, secrets, trivy, workflow-audit, dependency-review, sbom, sonar]
+    needs: [selection, lint, test, deps, codeql, codeql-actions, semgrep, secrets, trivy, workflow-audit, dependency-review, sbom, sonar]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:
@@ -1782,14 +1982,10 @@ jobs:
       # would be a gate that is green over nothing. The job needs `env.REQUIRED_REPORTS`,
       # the space-separated ids of jobs that must leave a report whenever they run.
       #
-      # It also fails when the scans were skipped for this commit. The scan jobs do
-      # not re-run on every push to an open PR (they run on open or reopen, or when
-      # the `rerun-security` label is present); without this, the required check would
-      # go green over an unscanned commit, so unscanned code could merge. Failing here
-      # keeps the gate honest: a pushed-but-unscanned commit cannot be merged until it
-      # is scanned.
+      # Selection-aware workflows allow only skips explicitly approved by the plan.
+      # DAST retains its event-based gate (it normally runs on dispatch/schedule).
       - name: Require a scan of the current commit
-        if: ${{ !inputs.scan-every-push && github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+        if: ${{ fromJSON(toJSON(needs)).selection.result == '' && !inputs.scan-every-push && github.event_name == 'pull_request' && github.event.action == 'synchronize' && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
         env:
           PREFIX: ${{ inputs.artifact-prefix }}
         run: |
@@ -1819,6 +2015,7 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
           PREFIX: ${{ inputs.artifact-prefix }}
           ENFORCE: ${{ inputs.enforce-security }}
+          PLAN: ${{ fromJSON(toJSON(needs)).selection.outputs.plan || '{}' }}
         run: |
           set -euo pipefail
           all="$RUNNER_TEMP/all"; mkdir -p "$all"
@@ -1828,6 +2025,12 @@ jobs:
           md="$RUNNER_TEMP/summary.md"
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           fail=0
+          if jq -e 'has("selection")' <<<"$NEEDS" > /dev/null; then
+            if [ "$(jq -r '.selection.result' <<<"$NEEDS")" != success ] || ! jq -e 'type == "object" and length > 0' <<<"$PLAN" > /dev/null; then
+              echo "::error::Check selection did not complete successfully"
+              fail=1
+            fi
+          fi
           {
             echo "<!-- security-summary:$PREFIX -->"
             echo "## $PREFIX: summary"
@@ -1845,6 +2048,19 @@ jobs:
             result=$(jq -r --arg j "$job" '.[$j].result' <<<"$NEEDS")
             dir="$all/$job"
             files="-"; findings="-"
+            if [ "$job" != selection ] && jq -e 'has("selection")' <<<"$NEEDS" > /dev/null; then
+              decision=$(jq -r --arg j "$job" '.[$j].run // false' <<<"$PLAN")
+              if ! jq -e --arg j "$job" '.[$j].run | type == "boolean"' <<<"$PLAN" > /dev/null; then
+                echo "::error::No selection decision for $job"
+                fail=1
+              elif [ "$result" = skipped ] && [ "$decision" = true ]; then
+                result="skipped, but REQUIRED by selection"
+                fail=1
+              elif [ "$result" = skipped ]; then
+                reason=$(jq -r --arg j "$job" '.[$j].reason' <<<"$PLAN")
+                result="skipped ($reason)"
+              fi
+            fi
             if [ -d "$dir" ] && [ -n "$(find "$dir" -type f -print -quit)" ]; then
               files=$(find "$dir" -type f ! -name findings.txt -printf '%f\n' | sort | paste -sd' ' -)
               if [ -f "$dir/findings.txt" ]; then findings=$(cat "$dir/findings.txt"); fi

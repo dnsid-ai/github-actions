@@ -153,7 +153,7 @@ jobs:
           exit "$fail"
 
   gate-invariants:
-    name: Scan gate and its negation are exact
+    name: Selection and fail-closed gate
     runs-on: ubuntu-24.04
     permissions:
       contents: read # read the generated workflows
@@ -161,8 +161,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Scan gate, its negation, and ungated lint/test jobs are correct
-        # The self-test callers all set scan-every-push: true, so the skip path,
-        # the "Require a scan" failure and the ungated-lint promise never execute
-        # at runtime. This static per-job check is the guard.
-        run: python3 scripts/check-gate-invariants.py
+      - name: Selection, intentional skips and missing-report protection
+        # Fixture scanners force full scans; exercise selection and skip paths separately.
+        run: |
+          python3 scripts/test-selection.py
+          python3 scripts/test-summary.py
+          python3 scripts/check-gate-invariants.py

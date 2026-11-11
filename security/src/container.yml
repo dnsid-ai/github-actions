@@ -22,9 +22,9 @@ on:
         default: ubuntu-24.04
       scan-every-push:
         description: >-
-          Run the security scans on every pushed commit, not only on PR
-          open/reopen. Off by default; set true for callers that want every
-          commit scanned (e.g. this repo's own security-self-test).
+          Force scanning on every commit, bypassing PR change selection.
+          By default PRs scan when their Dockerfile, build context or configuration
+          changes. Non-PR events and the 'rerun-security' label force a full scan.
         type: boolean
         default: false
       artifact-prefix:
@@ -71,8 +71,15 @@ on:
 permissions: {}
 
 jobs:
+  selection:
+    name: Select checks
+    env:
+      KIND: container
+    # @include selection-job.yml
+
   image:
-    if: ${{ inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    needs: selection
+    if: ${{ fromJSON(needs.selection.outputs.plan)['image'].run }}
     name: Image scan (Trivy)
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
@@ -141,7 +148,7 @@ jobs:
   summary:
     name: Summary
     if: always()
-    needs: [image]
+    needs: [selection, image]
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     permissions:

@@ -3,7 +3,8 @@
 
 semgrep:
   name: SAST (Semgrep)
-  if: ${{ (inputs.semgrep) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+  needs: selection
+  if: ${{ fromJSON(needs.selection.outputs.plan)['semgrep'].run }}
   runs-on: ${{ inputs.runs-on }}
   timeout-minutes: 20
   permissions:
@@ -56,7 +57,8 @@ semgrep:
 
 secrets:
   name: Secrets (gitleaks)
-  if: ${{ (inputs.gitleaks) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+  needs: selection
+  if: ${{ fromJSON(needs.selection.outputs.plan)['secrets'].run }}
   runs-on: ${{ inputs.runs-on }}
   timeout-minutes: 15
   permissions:
@@ -87,7 +89,8 @@ secrets:
 
 trivy:
   name: Vulnerabilities, misconfig and secrets (Trivy)
-  if: ${{ (inputs.trivy) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+  needs: selection
+  if: ${{ fromJSON(needs.selection.outputs.plan)['trivy'].run }}
   runs-on: ${{ inputs.runs-on }}
   timeout-minutes: 20
   permissions:
@@ -123,7 +126,8 @@ trivy:
 
 workflow-audit:
   name: Workflow security (zizmor)
-  if: ${{ (inputs.workflow-audit) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+  needs: selection
+  if: ${{ fromJSON(needs.selection.outputs.plan)['workflow-audit'].run }}
   runs-on: ${{ inputs.runs-on }}
   timeout-minutes: 10
   permissions:

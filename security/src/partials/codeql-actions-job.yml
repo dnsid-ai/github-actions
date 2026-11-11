@@ -7,7 +7,8 @@
 # setup for Actions.
 codeql-actions:
   name: "SAST (CodeQL: actions)"
-  if: ${{ (inputs.codeql-actions) && (inputs.scan-every-push || github.event_name != 'pull_request' || github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'rerun-security')) }}
+  needs: selection
+  if: ${{ fromJSON(needs.selection.outputs.plan)['codeql-actions'].run }}
   runs-on: ${{ inputs.runs-on }}
   timeout-minutes: 45
   permissions:

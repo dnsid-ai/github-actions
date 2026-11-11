@@ -1,0 +1,28 @@
+# Caller supplies the job's KIND environment variable; code below is generated
+# from this trusted workflow release, not executed from the caller's checkout.
+runs-on: ${{ inputs.runs-on }}
+timeout-minutes: 10
+permissions:
+  contents: read
+outputs:
+  plan: ${{ steps.select.outputs.plan }}
+steps:
+  - name: Check out commit graph for PR selection
+    if: ${{ github.event_name == 'pull_request' && !inputs.scan-every-push && !contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    with:
+      persist-credentials: false
+      fetch-depth: 0
+      filter: blob:none
+  - name: Select checks
+    id: select
+    env:
+      INPUTS: ${{ toJSON(inputs) }}
+      EVENT: ${{ github.event_name }}
+      BASE: ${{ github.event.pull_request.base.sha }}
+      HEAD: ${{ github.event.pull_request.head.sha }}
+      FORCE: ${{ inputs.scan-every-push || contains(github.event.pull_request.labels.*.name, 'rerun-security') }}
+    run: |
+      python3 -I - <<'PY'
+      # @include select.py
+      PY
